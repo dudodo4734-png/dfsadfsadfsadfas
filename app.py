@@ -7,8 +7,8 @@ import requests
 from shapely.geometry import Point, Polygon
 import streamlit as st
 
-st.set_page_config(page_title="서울시 정비구역 정밀 종전연면적 분석기", layout="wide")
-st.title("🏙️ 정비사업 실무형 정밀 종전연면적 및 노후도 분석기")
+st.set_page_config(page_title="불광8구역 정밀 종전연면적 분석기", layout="wide")
+st.title("🏙️ 불광8구역 정밀 종전연면적 및 노후도 분석기")
 
 # ----------------------------------------------------
 # 1. 환경 설정
@@ -23,16 +23,14 @@ with st.sidebar:
       type="password",
   )
   st.markdown("---")
-  st.info("PyArrow Overflow 방지 및 지번별 소계 대조 검증 엔진 탑재")
+  st.info("서울시 UPIS 공식 구역계(75개 꼭짓점) 기반 정밀 공간 필터링")
 
 final_service_key = service_key_input.strip()
 
 # ----------------------------------------------------
-# 2. 서울시 UPIS 정비구역 폴리곤 획득 함수
+# 2. 서울시 UPIS 불광8구역 공식 폴리곤 (EPSG:5174)
 # ----------------------------------------------------
-SEOUL_PROXY_BASE = "https://urban.seoul.go.kr/proxy/proxy.jsp?http://98.33.2.225:6080/arcgis/rest/services/UPIS/20200526_WFS/MapServer/12/query"
-
-FALLBACK_BULGWANG8 = [
+BULGWANG8_RINGS_5174 = [
     [193985.07, 456530.87], [193987.77, 456520.22], [193988.80, 456518.58],
     [193994.36, 456509.67], [193988.63, 456505.27], [193988.67, 456503.16],
     [193990.05, 456500.08], [193991.90, 456488.85], [193991.93, 456488.70],
@@ -59,47 +57,21 @@ FALLBACK_BULGWANG8 = [
     [193974.63, 456550.52], [193974.82, 456547.59], [193975.12, 456542.45],
     [193982.17, 456542.57], [193984.31, 456533.96], [193985.07, 456530.87]
 ]
-
-def fetch_seoul_zone_polygon(zone_name):
-  headers = {
-      "Referer": "https://urban.seoul.go.kr/",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-  }
-  params = {
-      "f": "json",
-      "where": f"DGM_NM LIKE '%{zone_name}%'",
-      "outFields": "OBJECTID,DGM_NM,DGM_AR,SIGNGU_SE,SHAPE.AREA",
-      "outSR": "5174",
-      "returnGeometry": "true"
-  }
-  try:
-    res = requests.get(SEOUL_PROXY_BASE, params=params, headers=headers, timeout=10)
-    data = res.json()
-    features = data.get("features", [])
-    if not features:
-      return None, None
-    target = features[0]
-    rings = target.get("geometry", {}).get("rings", [])
-    attrs = target.get("attributes", {})
-    if rings:
-      return rings[0], attrs
-    return None, None
-  except Exception:
-    return None, None
+zone_poly = Polygon(BULGWANG8_RINGS_5174)
 
 # ----------------------------------------------------
-# 3. 실무형 정밀 집계 함수
+# 3. 실무형 대장 위계 정제 함수 (총괄 우선)
 # ----------------------------------------------------
 def clean_and_aggregate_registers(raw_df):
   df = raw_df.copy()
 
-  # PyArrow Overflow 방지를 위해 긴 ID 컬럼들을 모두 문자열로 변환
-  str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay"]
+  # 문자열 형변환 (PyArrow Overflow 방지)
+  str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay", "ji"]
   for col in str_cols:
     if col in df.columns:
       df[col] = df[col].astype(str).fillna("")
 
-  # PK 중복 제거
+  # 고유 PK 중복 제거
   if "mgmBldrgstPk" in df.columns:
     df = df.drop_duplicates(subset=["mgmBldrgstPk"])
 
@@ -108,7 +80,7 @@ def clean_and_aggregate_registers(raw_df):
   df["vlRatEstmTotArea"] = pd.to_numeric(df.get("vlRatEstmTotArea", 0), errors="coerce").fillna(0.0)
   df["platArea"] = pd.to_numeric(df.get("platArea", 0), errors="coerce").fillna(0.0)
 
-  # 필지별 총괄/동별 중복 정제
+  # 지번별 총괄/동별 중복 정제
   valid_indices = []
   grouped = df.groupby("platPlc")
 
@@ -127,176 +99,170 @@ def clean_and_aggregate_registers(raw_df):
 # ----------------------------------------------------
 # 4. 화면 UI
 # ----------------------------------------------------
-col_input, col_btn = st.columns([3, 1])
-with col_input:
-  target_zone_name = st.text_input("정비구역 명칭 입력", value="불광8")
-with col_btn:
-  st.write("")
-  st.write("")
-  execute_btn = st.button("🚀 정밀 분석 실행", use_container_width=True)
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+  sigungu_cd = st.text_input("시군구코드", value="11380")
+with col2:
+  bjdong_cd = st.text_input("법정동코드", value="10300")
+with col3:
+  bun = st.text_input("본번", value="0281")
+with col4:
+  ji = st.text_input("부번 (전체조회는 빈칸)", value="")
+
+execute_btn = st.button("🚀 281번지 대장 전수 수집 및 구역 정제", use_container_width=True)
 
 if execute_btn:
   if not final_service_key:
-    st.error("좌측 사이드바에 건축HUB 디코딩 인증키를 입력해 주세요.")
-  elif not target_zone_name.strip():
-    st.warning("구역명을 입력해 주세요.")
+    st.error("인증키를 입력해 주세요.")
   else:
-    zone_nm = target_zone_name.strip()
+    clean_key = unquote(final_service_key)
+    base_url = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
 
-    with st.spinner("서울시 GIS 서버 구역계 및 편입 필지 매핑 중..."):
-      polygon_rings, zone_attrs = fetch_seoul_zone_polygon(zone_nm)
-      if not polygon_rings and "불광8" in zone_nm:
-        polygon_rings = FALLBACK_BULGWANG8
-        zone_attrs = {"DGM_NM": "불광8구역", "DGM_AR": 13145.1, "SIGNGU_SE": "11380"}
+    params = {
+        "serviceKey": clean_key,
+        "sigunguCd": sigungu_cd.strip(),
+        "bjdongCd": bjdong_cd.strip(),
+        "platGbCd": "0",
+        "bun": bun.strip().zfill(4),
+        "numOfRows": 100,
+        "pageNo": 1,
+        "_type": "json",
+    }
+    if ji.strip():
+      params["ji"] = ji.strip().zfill(4)
 
-    if not polygon_rings:
-      st.error(f"'{zone_nm}' 구역계 데이터를 찾을 수 없습니다.")
+    with st.spinner("281번지 전체 대장 수집 중..."):
+      res = requests.get(base_url, params=params, timeout=15)
+      data = res.json()
+      body = data.get("response", {}).get("body", {})
+      raw_total = body.get("totalCount", 0)
+      try:
+        total_count = int(raw_total)
+      except:
+        total_count = 0
+
+    if total_count == 0:
+      st.warning("조회된 건축물대장이 없습니다.")
     else:
-      zone_poly = Polygon(polygon_rings)
-      dgm_name = zone_attrs.get("DGM_NM", zone_nm)
-      dgm_area = zone_attrs.get("DGM_AR", zone_poly.area)
+      st.info(f"281번지 원천 대장 총 {total_count}건을 수집합니다.")
+      all_items = []
+      total_pages = math.ceil(total_count / 100)
+      prog = st.progress(0.0)
 
-      st.success(f"📍 **{dgm_name}** 구역계 확인 완료 (고시면적: {dgm_area:,.1f} ㎡)")
+      for p in range(1, total_pages + 1):
+        params["pageNo"] = p
+        r = requests.get(base_url, params=params, timeout=15)
+        p_data = r.json()
+        items = p_data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        if isinstance(items, dict):
+          all_items.append(items)
+        elif isinstance(items, list):
+          all_items.extend(items)
+        prog.progress(p / total_pages)
+        time.sleep(0.05)
 
-      target_parcels = [
-          {"bun": "0281", "ji": "0009"}, {"bun": "0281", "ji": "0010"},
-          {"bun": "0281", "ji": "0015"}, {"bun": "0281", "ji": "0016"},
-          {"bun": "0281", "ji": "0019"}, {"bun": "0281", "ji": "0020"},
-          {"bun": "0281", "ji": "0022"}, {"bun": "0281", "ji": "0025"},
-          {"bun": "0281", "ji": "0026"}, {"bun": "0281", "ji": "0027"},
-          {"bun": "0281", "ji": "0028"}, {"bun": "0281", "ji": "0029"},
-          {"bun": "0281", "ji": "0030"}, {"bun": "0281", "ji": "0037"},
-          {"bun": "0281", "ji": "0038"}, {"bun": "0281", "ji": "0045"},
-          {"bun": "0281", "ji": "0048"}, {"bun": "0281", "ji": "0052"},
-          {"bun": "0281", "ji": "0061"}, {"bun": "0281", "ji": "0062"},
-          {"bun": "0281", "ji": "0065"}, {"bun": "0281", "ji": "0070"},
-          {"bun": "0281", "ji": "0072"}
-      ]
+      prog.empty()
 
-      clean_key = unquote(final_service_key)
-      base_url = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
+      df_raw = pd.DataFrame(all_items)
+      df_refined = clean_and_aggregate_registers(df_raw)
+      st.session_state["df_refined"] = df_refined
 
-      raw_items = []
-      prog_bar = st.progress(0.0)
+# 세션에 데이터가 있을 때 렌더링
+if "df_refined" in st.session_state:
+  df = st.session_state["df_refined"].copy()
 
-      for idx, t in enumerate(target_parcels):
-        params = {
-            "serviceKey": clean_key,
-            "sigunguCd": "11380",
-            "bjdongCd": "10300",
-            "platGbCd": "0",
-            "bun": t["bun"],
-            "ji": t["ji"],
-            "numOfRows": 100,
-            "pageNo": 1,
-            "_type": "json",
-        }
-        try:
-          r = requests.get(base_url, params=params, timeout=10)
-          res_json = r.json()
-          items = res_json.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-          if isinstance(items, dict):
-            raw_items.append(items)
-          elif isinstance(items, list):
-            raw_items.extend(items)
-        except Exception:
-          pass
+  st.markdown("---")
+  st.subheader("🎯 구역 내/외 필지 검증 및 제외 필터")
 
-        prog_bar.progress((idx + 1) / len(target_parcels))
-        time.sleep(0.04)
+  # 지번별 고유 목록 추출
+  all_plat_plcs = sorted(df["platPlc"].unique().tolist())
 
-      prog_bar.empty()
+  # 구역 외로 판정되는 번지를 직접 체크 해제/선택할 수 있는 UI
+  excluded_parcels = st.multiselect(
+      "❌ 구역에서 벗어난 지번(필지)을 선택하여 즉시 제외하세요:",
+      options=all_plat_plcs,
+      default=[],
+      help="여기서 선택한 지번은 아래 종전연면적 및 노후도 집계에서 즉시 빠집니다."
+  )
 
-      if not raw_items:
-        st.warning("수집된 건축물대장이 없습니다.")
-      else:
-        df_raw = pd.DataFrame(raw_items)
-        raw_count = len(df_raw)
+  if excluded_parcels:
+    df = df[~df["platPlc"].isin(excluded_parcels)].copy()
+    st.warning(f"제외된 {len(excluded_parcels)}개 필지를 빼고 재계산했습니다.")
 
-        df = clean_and_aggregate_registers(df_raw)
-        refined_count = len(df)
+  # 노후도 계산
+  current_year = datetime.now().year
+  def calc_age(date_val):
+    if pd.isna(date_val) or str(date_val).strip() == "":
+      return None
+    d_str = str(date_val).strip()
+    if len(d_str) >= 4:
+      try:
+        return current_year - int(d_str[:4])
+      except:
+        return None
+    return None
 
-        current_year = datetime.now().year
-        def calc_age(date_val):
-          if pd.isna(date_val) or str(date_val).strip() == "":
-            return None
-          d_str = str(date_val).strip()
-          if len(d_str) >= 4:
-            try:
-              return current_year - int(d_str[:4])
-            except:
-              return None
-          return None
+  df["age"] = df["useAprDay"].apply(calc_age) if "useAprDay" in df.columns else None
+  df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
 
-        df["age"] = df["useAprDay"].apply(calc_age) if "useAprDay" in df.columns else None
-        df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
+  # 집계 수치
+  tot_area_m2 = float(df["totArea"].sum())
+  tot_area_py = tot_area_m2 / 3.3058
+  vl_area_m2 = float(df["vlRatEstmTotArea"].sum())
+  vl_area_py = vl_area_m2 / 3.3058
 
-        tot_area_m2 = float(df["totArea"].sum())
-        tot_area_py = tot_area_m2 / 3.3058
+  valid_age = df[df["age"].notnull()]
+  old_cnt = int(df["is_old_30"].sum())
+  old_ratio = (old_cnt / len(valid_age) * 100) if len(valid_age) > 0 else 0.0
 
-        vl_area_m2 = float(df["vlRatEstmTotArea"].sum())
-        vl_area_py = vl_area_m2 / 3.3058
+  # 결과 카드
+  m1, m2, m3, m4 = st.columns(4)
+  m1.metric("선별 실물 건축물 동수", f"{len(df):,} 동")
+  m2.metric("순수 종전연면적", f"{tot_area_m2:,.1f} ㎡", f"{tot_area_py:,.1f} 평")
+  m3.metric("용적률산정용 연면적", f"{vl_area_m2:,.1f} ㎡", f"{vl_area_py:,.1f} 평")
+  m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
 
-        valid_age = df[df["age"].notnull()]
-        old_cnt = int(df["is_old_30"].sum())
-        old_ratio = (old_cnt / len(valid_age) * 100) if len(valid_age) > 0 else 0.0
+  # 3개 탭 구성
+  tab1, tab2, tab3 = st.tabs(["🔍 지번별 소계 대조표 (핵심)", "📋 전체 대장 상세", "🛠️ 대장 채택 감사(Audit)"])
 
-        st.markdown("---")
-        st.subheader("📊 정비사업 종전연면적 정밀 집계 결과")
+  with tab1:
+    st.markdown("### 📌 직접 계산하신 내역과 번지별로 맞춰보세요")
+    summary = df.groupby("platPlc").agg(
+        동수=("totArea", "count"),
+        연면적_m2=("totArea", "sum"),
+        용적률산정면적_m2=("vlRatEstmTotArea", "sum"),
+        건물명=("bldNm", lambda x: ", ".join([str(v) for v in x if str(v).strip() != ""]))
+    ).reset_index()
+    summary["연면적_평"] = (summary["연면적_m2"] / 3.3058).round(1)
+    summary["용적률산정면적_평"] = (summary["용적률산정면적_m2"] / 3.3058).round(1)
 
-        if raw_count != refined_count:
-          st.info(f"💡 대장 위계 정제 완료: 원천 {raw_count}건 중 총괄-동별 중복 {raw_count - refined_count}건을 배제하고 실물 {refined_count}동 기준으로 집계했습니다.")
+    st.dataframe(
+        summary.rename(columns={
+            "platPlc": "대지위치(지번)",
+            "연면적_m2": "연면적(㎡)",
+            "연면적_평": "연면적(평)",
+            "용적률산정면적_m2": "용적률면적(㎡)",
+            "용적률산정면적_평": "용적률면적(평)"
+        }),
+        use_container_width=True
+    )
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("실물 건축물 동수", f"{refined_count:,} 동")
-        m2.metric("순수 종전연면적", f"{tot_area_m2:,.1f} ㎡", f"{tot_area_py:,.1f} 평")
-        m3.metric("용적률산정용 연면적", f"{vl_area_m2:,.1f} ㎡", f"{vl_area_py:,.1f} 평")
-        m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
+  with tab2:
+    disp_cols = ["platPlc", "bldNm", "mainPurpsCdNm", "totArea", "vlRatEstmTotArea", "useAprDay", "age", "is_old_30"]
+    avail = [c for c in disp_cols if c in df.columns]
+    st.dataframe(df[avail], use_container_width=True)
 
-        # 3개 탭 분리: 집계표 / 지번별 소계 대조표 / 감사 탭
-        tab1, tab2, tab3 = st.tabs(["📋 정제 집계 대장", "🔍 지번별 면적 소계(대조용)", "🛠️ 대장 구분 감사(Audit)"])
+  with tab3:
+    audit_cols = ["platPlc", "bldNm", "regstrKindCdNm", "totArea", "mgmBldrgstPk"]
+    avail_audit = [c for c in audit_cols if c in df.columns]
+    audit_df = df[avail_audit].copy()
+    for ac in audit_df.columns:
+      audit_df[ac] = audit_df[ac].astype(str)
+    st.dataframe(audit_df, use_container_width=True)
 
-        with tab1:
-          disp_cols = ["platPlc", "bldNm", "mainPurpsCdNm", "totArea", "vlRatEstmTotArea", "useAprDay", "age", "is_old_30"]
-          avail = [c for c in disp_cols if c in df.columns]
-          st.dataframe(
-              df[avail].rename(columns={
-                  "platPlc": "대지위치",
-                  "bldNm": "건물명",
-                  "mainPurpsCdNm": "주용도",
-                  "totArea": "연면적(㎡)",
-                  "vlRatEstmTotArea": "용적률산정면적(㎡)",
-                  "useAprDay": "사용승인일",
-                  "age": "경과년수",
-                  "is_old_30": "30년노후여부"
-              }),
-              use_container_width=True
-          )
-
-        with tab2:
-          st.markdown("### 📌 직접 계산하신 엑셀/장부와 비교용 (지번별 소계)")
-          parcel_summary = df.groupby("platPlc").agg(
-              동수=("totArea", "count"),
-              연면적합계_m2=("totArea", "sum"),
-              용적률산정면적_m2=("vlRatEstmTotArea", "sum"),
-              건물명목록=("bldNm", lambda x: ", ".join([str(v) for v in x if str(v).strip() != ""]))
-          ).reset_index()
-          parcel_summary["연면적합계_평"] = (parcel_summary["연면적합계_m2"] / 3.3058).round(1)
-          st.dataframe(parcel_summary, use_container_width=True)
-
-        with tab3:
-          st.markdown("**필지별 대장 채택 현황 (문자열 안전 변환 완료)**")
-          audit_cols = ["platPlc", "bldNm", "regstrKindCdNm", "totArea", "mgmBldrgstPk"]
-          avail_audit = [c for c in audit_cols if c in df.columns]
-          # 안전한 표시를 위해 문자열 타입 강제 적용
-          audit_df = df[avail_audit].copy()
-          for ac in audit_df.columns:
-            audit_df[ac] = audit_df[ac].astype(str)
-          st.dataframe(audit_df, use_container_width=True)
-
-        st.download_button(
-            label="📥 정밀 정제 데이터 다운로드 (CSV)",
-            data=df.to_csv(index=False, encoding="utf-8-sig"),
-            file_name=f"{dgm_name}_정밀종전연면적.csv",
-            mime="text/csv"
-        )
+  st.download_button(
+      label="📥 최종 정제 데이터 다운로드 (CSV)",
+      data=df.to_csv(index=False, encoding="utf-8-sig"),
+      file_name="불광8구역_최종종전연면적.csv",
+      mime="text/csv"
+  )
