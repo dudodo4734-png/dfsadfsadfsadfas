@@ -58,7 +58,13 @@ if st.button("🚀 데이터 전수 수집 및 분석 실행", use_container_wid
         data = res.json()
 
       body = data.get("response", {}).get("body", {})
-      total_count = body.get("totalCount", 0)
+      
+      # 🚨 핵심 수정: totalCount를 무조건 int 숫자로 강제 변환
+      raw_total = body.get("totalCount", 0)
+      try:
+        total_count = int(raw_total)
+      except (ValueError, TypeError):
+        total_count = 0
 
       if total_count == 0:
         st.warning("조회된 건축물대장 데이터가 없습니다.")
@@ -68,9 +74,10 @@ if st.button("🚀 데이터 전수 수집 및 분석 실행", use_container_wid
         # 전수 데이터 수집
         all_items = []
         num_of_rows = 100
+        # total_count가 int이므로 안전하게 계산됨
         total_pages = math.ceil(total_count / num_of_rows)
 
-        progress_bar = st.progress(0)
+        progress_bar = st.progress(0.0)
 
         for page in range(1, total_pages + 1):
           params["pageNo"] = page
@@ -88,13 +95,15 @@ if st.button("🚀 데이터 전수 수집 및 분석 실행", use_container_wid
           elif isinstance(items, list):
             all_items.extend(items)
 
-          progress_bar.progress(page / total_pages)
+          # progress 연산 안전 처리
+          progress_val = float(page / total_pages)
+          progress_bar.progress(min(progress_val, 1.0))
           time.sleep(0.1)
 
         # 데이터 가공 및 수치형 변환
         df = pd.DataFrame(all_items)
 
-        # 문자열로 들어오는 연면적을 float 숫자로 강제 변환
+        # 연면적, 대지면적을 float 숫자로 강제 변환
         if "totArea" in df.columns:
           df["totArea"] = pd.to_numeric(df["totArea"], errors="coerce").fillna(0.0)
         else:
