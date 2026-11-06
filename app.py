@@ -4,190 +4,113 @@ from datetime import datetime
 from urllib.parse import unquote
 import pandas as pd
 import requests
+from shapely.geometry import Point, Polygon
 import streamlit as st
 
-st.set_page_config(page_title="정비사업 건축물대장 분석기", layout="wide")
-st.title("🏢 정비사업 종전연면적 및 노후도 분석기")
+st.set_page_config(page_title="서울시 정비구역 자동 필지 분석기", layout="wide")
+st.title("🏙️ 서울시 정비구역 자동 필지 선별 및 대장 분석기")
 
-# 사이드바 설정
+# ----------------------------------------------------
+# 1. 환경 설정
+# ----------------------------------------------------
+DEFAULT_SERVICE_KEY = ""  # 공공데이터포털 일반 인증키 (Decoding) 입력
+
 with st.sidebar:
   st.header("🔑 API 설정")
-  service_key = st.text_input(
-      "공공데이터 일반 인증키 (Decoding 키)",
-      value="ewFq4vtF6VE99JJ6B3hs9hD0YRssb4Y4p0KGSpLQsIkO5tSTNhauXB2y47pTnCu00ghthtujLk7cKBVQDzC0kg==",
+  service_key_input = st.text_input(
+      "건축HUB Decoding 인증키",
+      value=DEFAULT_SERVICE_KEY,
       type="password",
   )
+  st.markdown("---")
+  st.info("서울시 UPIS ArcGIS 공간 서버와 국토부 건축HUB API를 연동합니다.")
 
-# 기본 입력창
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-  sigungu_cd = st.text_input("시군구코드", value="11380")
-with col2:
-  bjdong_cd = st.text_input("법정동코드", value="10300")
-with col3:
-  bun = st.text_input("본번 (4자리 자동보정)", value="0281")
-with col4:
-  ji = st.text_input("부번 (전수조회는 빈칸)", value="")
+final_service_key = service_key_input.strip()
 
-if st.button("🚀 데이터 전수 수집 및 분석 실행", use_container_width=True):
-  if not service_key:
-    st.error("인증키를 입력해 주세요.")
-  else:
-    try:
-      clean_key = unquote(service_key.strip())
-      base_url = (
-          "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
-      )
+# ----------------------------------------------------
+# 2. 서울시 UPIS 정비구역 폴리곤 획득 함수
+# ----------------------------------------------------
+SEOUL_PROXY_BASE = "https://urban.seoul.go.kr/proxy/proxy.jsp?http://98.33.2.225:6080/arcgis/rest/services/UPIS/20200526_WFS/MapServer/12/query"
 
-      # 1페이지 호출하여 totalCount 확인
-      params = {
-          "serviceKey": clean_key,
-          "sigunguCd": sigungu_cd.strip(),
-          "bjdongCd": bjdong_cd.strip(),
-          "platGbCd": "0",
-          "bun": bun.strip().zfill(4),
-          "numOfRows": 100,
-          "pageNo": 1,
-          "_type": "json",
-      }
-      if ji.strip():
-        params["ji"] = ji.strip().zfill(4)
 
-      with st.spinner("국토부 건축HUB 서버와 통신 중..."):
-        res = requests.get(base_url, params=params, timeout=15)
-        data = res.json()
+def fetch_seoul_zone_polygon(zone_name):
+  headers = {
+      "Referer": "https://urban.seoul.go.kr/",
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      ),
+  }
+  params = {
+      "f": "json",
+      "where": f"DGM_NM LIKE '%{zone_name}%'",
+      "outFields": "OBJECTID,DGM_NM,DGM_AR,SIGNGU_SE,SHAPE.AREA",
+      "outSR": "5174",
+      "returnGeometry": "true",
+  }
 
-      body = data.get("response", {}).get("body", {})
-      
-      # 🚨 핵심 수정: totalCount를 무조건 int 숫자로 강제 변환
-      raw_total = body.get("totalCount", 0)
-      try:
-        total_count = int(raw_total)
-      except (ValueError, TypeError):
-        total_count = 0
+  try:
+    res = requests.get(
+        SEOUL_PROXY_BASE, params=params, headers=headers, timeout=10
+    )
+    data = res.json()
+    features = data.get("features", [])
+    if not features:
+      return None, None
+    target = features[0]
+    rings = target.get("geometry", {}).get("rings", [])
+    attrs = target.get("attributes", {})
+    if rings:
+      return rings[0], attrs
+    return None, None
+  except Exception as e:
+    st.error(f"서울시 GIS 서버 연동 오류: {e}")
+    return None, None
 
-      if total_count == 0:
-        st.warning("조회된 건축물대장 데이터가 없습니다.")
-      else:
-        st.success(f"총 {total_count}건의 데이터를 확인했습니다. 수집을 진행합니다.")
 
-        # 전수 데이터 수집
-        all_items = []
-        num_of_rows = 100
-        # total_count가 int이므로 안전하게 계산됨
-        total_pages = math.ceil(total_count / num_of_rows)
-
-        progress_bar = st.progress(0.0)
-
-        for page in range(1, total_pages + 1):
-          params["pageNo"] = page
-          res = requests.get(base_url, params=params, timeout=15)
-          page_data = res.json()
-          items = (
-              page_data.get("response", {})
-              .get("body", {})
-              .get("items", {})
-              .get("item", [])
-          )
-
-          if isinstance(items, dict):
-            all_items.append(items)
-          elif isinstance(items, list):
-            all_items.extend(items)
-
-          # progress 연산 안전 처리
-          progress_val = float(page / total_pages)
-          progress_bar.progress(min(progress_val, 1.0))
-          time.sleep(0.1)
-
-        # 데이터 가공 및 수치형 변환
-        df = pd.DataFrame(all_items)
-
-        # 연면적, 대지면적을 float 숫자로 강제 변환
-        if "totArea" in df.columns:
-          df["totArea"] = pd.to_numeric(df["totArea"], errors="coerce").fillna(0.0)
-        else:
-          df["totArea"] = 0.0
-
-        if "platArea" in df.columns:
-          df["platArea"] = pd.to_numeric(df["platArea"], errors="coerce").fillna(0.0)
-        else:
-          df["platArea"] = 0.0
-
-        # 노후도 계산
-        current_year = datetime.now().year
-
-        def calc_age(date_val):
-          if pd.isna(date_val) or str(date_val).strip() == "":
-            return None
-          d_str = str(date_val).strip()
-          if len(d_str) >= 4:
-            try:
-              b_year = int(d_str[:4])
-              return current_year - b_year
-            except:
-              return None
-          return None
-
-        if "useAprDay" in df.columns:
-          df["age"] = df["useAprDay"].apply(calc_age)
-        else:
-          df["age"] = None
-
-        df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
-
-        # 주요 지표 집계
-        total_bld_count = len(df)
-        total_gross_area_m2 = float(df["totArea"].sum())
-        total_gross_area_py = total_gross_area_m2 / 3.3058
-
-        valid_age_df = df[df["age"].notnull()]
-        old_count = int(df["is_old_30"].sum())
-        old_ratio = (old_count / len(valid_age_df) * 100) if len(valid_age_df) > 0 else 0.0
-
-        # 결과 화면 출력
-        st.subheader("📊 정비사업 기초 분석 결과")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("총 건축물 동수", f"{total_bld_count:,} 동")
-        m2.metric("종전 연면적 합계", f"{total_gross_area_m2:,.1f} ㎡")
-        m3.metric("종전 연면적 (평)", f"{total_gross_area_py:,.1f} 평")
-        m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_count}동 / {len(valid_age_df)}동")
-
-        # 테이블 뷰
-        display_cols = [
-            "platPlc",
-            "bldNm",
-            "mainPurpsCdNm",
-            "totArea",
-            "useAprDay",
-            "age",
-            "is_old_30",
-        ]
-        available_cols = [c for c in display_cols if c in df.columns]
-
-        st.dataframe(
-            df[available_cols].rename(
-                columns={
-                    "platPlc": "대지위치",
-                    "bldNm": "건물명",
-                    "mainPurpsCdNm": "주용도",
-                    "totArea": "연면적(㎡)",
-                    "useAprDay": "사용승인일",
-                    "age": "경과년수",
-                    "is_old_30": "30년노후여부",
-                }
-            ),
-            use_container_width=True,
-        )
-
-        # CSV 다운로드 버튼
-        csv = df.to_csv(index=False, encoding="utf-8-sig")
-        st.download_button(
-            label="📥 수집 데이터 원본 다운로드 (CSV)",
-            data=csv,
-            file_name=f"건축물대장_{sigungu_cd}_{bjdong_cd}_{bun}.csv",
-            mime="text/csv",
-        )
-
-    except Exception as e:
-      st.error(f"오류가 발생했습니다: {e}")
+# 불광8구역 백업 폴리곤 좌표 (서버 프록시 세션 만료 시 대체용)
+FALLBACK_BULGWANG8 = [
+    [193985.07, 456530.87],
+    [193987.77, 456520.22],
+    [193988.80, 456518.58],
+    [193994.36, 456509.67],
+    [193988.63, 456505.27],
+    [193988.67, 456503.16],
+    [193990.05, 456500.08],
+    [193991.90, 456488.85],
+    [193991.93, 456488.70],
+    [193993.33, 456481.22],
+    [193994.74, 456481.29],
+    [194000.00, 456480.62],
+    [194003.27, 456480.20],
+    [194003.33, 456478.26],
+    [194000.00, 456474.56],
+    [193995.13, 456469.15],
+    [193986.48, 456467.94],
+    [193977.95, 456466.48],
+    [193965.43, 456464.67],
+    [193964.39, 456464.40],
+    [193947.27, 456461.74],
+    [193943.64, 456461.09],
+    [193931.45, 456459.58],
+    [193916.86, 456456.53],
+    [193914.75, 456465.25],
+    [193913.37, 456472.18],
+    [193912.88, 456474.67],
+    [193910.08, 456490.73],
+    [193908.94, 456499.09],
+    [193908.79, 456506.24],
+    [193908.40, 456522.81],
+    [193908.35, 456535.51],
+    [193908.73, 456555.66],
+    [193908.88, 456563.73],
+    [193908.43, 456570.28],
+    [193908.56, 456571.46],
+    [193909.64, 456581.94],
+    [193910.90, 456590.53],
+    [193913.07, 456601.01],
+    [193914.66, 456608.35],
+    [193916.04, 456620.49],
+    [193916.67, 456626.51],
+    [193918.14, 456627.51],
+    [193922.42, 456627.08],
+    [193926.57, 45662
