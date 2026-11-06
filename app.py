@@ -23,12 +23,7 @@ with st.sidebar:
       type="password",
   )
   st.markdown("---")
-  st.markdown("""
-  **정밀 집계 기준**:
-  - `mgmBldrgstPk` 고유식별자 중복 제거
-  - 총괄표제부(`2`) 존재 시 동별표제부(`3`) 중복 합산 배제
-  - 순수 연면적 및 용적률산정용 연면적 동시 산출
-  """)
+  st.info("PyArrow Overflow 방지 및 지번별 소계 대조 검증 엔진 탑재")
 
 final_service_key = service_key_input.strip()
 
@@ -96,37 +91,33 @@ def fetch_seoul_zone_polygon(zone_name):
 # 3. 실무형 정밀 집계 함수
 # ----------------------------------------------------
 def clean_and_aggregate_registers(raw_df):
-  """
-  대장구분 위계(총괄표제부 우선) 및 중복 배제 필터링
-  """
   df = raw_df.copy()
 
-  # 1. 고유 관리번호(PK) 기준 단순 중복 제거
+  # PyArrow Overflow 방지를 위해 긴 ID 컬럼들을 모두 문자열로 변환
+  str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay"]
+  for col in str_cols:
+    if col in df.columns:
+      df[col] = df[col].astype(str).fillna("")
+
+  # PK 중복 제거
   if "mgmBldrgstPk" in df.columns:
     df = df.drop_duplicates(subset=["mgmBldrgstPk"])
 
-  # 2. 수치 데이터 강제 변환
+  # 수치형 변환
   df["totArea"] = pd.to_numeric(df.get("totArea", 0), errors="coerce").fillna(0.0)
   df["vlRatEstmTotArea"] = pd.to_numeric(df.get("vlRatEstmTotArea", 0), errors="coerce").fillna(0.0)
   df["platArea"] = pd.to_numeric(df.get("platArea", 0), errors="coerce").fillna(0.0)
 
-  # regstrKindCd 규격화 (문자열)
-  df["regstrKindCd"] = df.get("regstrKindCd", "").astype(str).str.strip()
-
-  # 3. 필지별(platPlc 기준) 총괄/동별 중복 정제
+  # 필지별 총괄/동별 중복 정제
   valid_indices = []
   grouped = df.groupby("platPlc")
 
   for plat_plc, group in grouped:
-    # 해당 필지에 총괄표제부(코드 2)가 있는지 확인
     has_summary = (group["regstrKindCd"] == "2").any()
-
     if has_summary:
-      # 총괄표제부가 있으면 총괄표제부만 인정 (동별표제부 3 탈락)
       summary_rows = group[group["regstrKindCd"] == "2"]
       valid_indices.extend(summary_rows.index.tolist())
     else:
-      # 총괄표제부가 없으면 일반(1) 또는 동별(3) 표제부 모두 인정
       normal_rows = group[group["regstrKindCd"].isin(["1", "3", ""])]
       valid_indices.extend(normal_rows.index.tolist())
 
@@ -167,7 +158,6 @@ if execute_btn:
 
       st.success(f"📍 **{dgm_name}** 구역계 확인 완료 (고시면적: {dgm_area:,.1f} ㎡)")
 
-      # 불광8구역 검증된 편입 필지군
       target_parcels = [
           {"bun": "0281", "ji": "0009"}, {"bun": "0281", "ji": "0010"},
           {"bun": "0281", "ji": "0015"}, {"bun": "0281", "ji": "0016"},
@@ -223,11 +213,9 @@ if execute_btn:
         df_raw = pd.DataFrame(raw_items)
         raw_count = len(df_raw)
 
-        # 🚨 실무형 중복제거 및 위계 정제 실행
         df = clean_and_aggregate_registers(df_raw)
         refined_count = len(df)
 
-        # 노후도 계산
         current_year = datetime.now().year
         def calc_age(date_val):
           if pd.isna(date_val) or str(date_val).strip() == "":
@@ -243,7 +231,6 @@ if execute_btn:
         df["age"] = df["useAprDay"].apply(calc_age) if "useAprDay" in df.columns else None
         df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
 
-        # 집계 지표 산출
         tot_area_m2 = float(df["totArea"].sum())
         tot_area_py = tot_area_m2 / 3.3058
 
@@ -258,7 +245,7 @@ if execute_btn:
         st.subheader("📊 정비사업 종전연면적 정밀 집계 결과")
 
         if raw_count != refined_count:
-          st.info(f"💡 대장 위계 정제 완료: 원천 {raw_count}건 중 총괄-동별 중복 {raw_count - refined_count}건을 배제하고 실물 {refined_count}동 기준으로 정확히 집계했습니다.")
+          st.info(f"💡 대장 위계 정제 완료: 원천 {raw_count}건 중 총괄-동별 중복 {raw_count - refined_count}건을 배제하고 실물 {refined_count}동 기준으로 집계했습니다.")
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("실물 건축물 동수", f"{refined_count:,} 동")
@@ -266,8 +253,8 @@ if execute_btn:
         m3.metric("용적률산정용 연면적", f"{vl_area_m2:,.1f} ㎡", f"{vl_area_py:,.1f} 평")
         m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
 
-        # 결과 탭 분리
-        tab1, tab2 = st.tabs(["📋 정제 집계 대장", "🔍 대장 구분별 감사(Audit)"])
+        # 3개 탭 분리: 집계표 / 지번별 소계 대조표 / 감사 탭
+        tab1, tab2, tab3 = st.tabs(["📋 정제 집계 대장", "🔍 지번별 면적 소계(대조용)", "🛠️ 대장 구분 감사(Audit)"])
 
         with tab1:
           disp_cols = ["platPlc", "bldNm", "mainPurpsCdNm", "totArea", "vlRatEstmTotArea", "useAprDay", "age", "is_old_30"]
@@ -287,10 +274,25 @@ if execute_btn:
           )
 
         with tab2:
-          st.markdown("**필지별 대장 구분 현황 (총괄표제부 / 동별표제부 / 일반표제부)**")
+          st.markdown("### 📌 직접 계산하신 엑셀/장부와 비교용 (지번별 소계)")
+          parcel_summary = df.groupby("platPlc").agg(
+              동수=("totArea", "count"),
+              연면적합계_m2=("totArea", "sum"),
+              용적률산정면적_m2=("vlRatEstmTotArea", "sum"),
+              건물명목록=("bldNm", lambda x: ", ".join([str(v) for v in x if str(v).strip() != ""]))
+          ).reset_index()
+          parcel_summary["연면적합계_평"] = (parcel_summary["연면적합계_m2"] / 3.3058).round(1)
+          st.dataframe(parcel_summary, use_container_width=True)
+
+        with tab3:
+          st.markdown("**필지별 대장 채택 현황 (문자열 안전 변환 완료)**")
           audit_cols = ["platPlc", "bldNm", "regstrKindCdNm", "totArea", "mgmBldrgstPk"]
           avail_audit = [c for c in audit_cols if c in df.columns]
-          st.dataframe(df[avail_audit], use_container_width=True)
+          # 안전한 표시를 위해 문자열 타입 강제 적용
+          audit_df = df[avail_audit].copy()
+          for ac in audit_df.columns:
+            audit_df[ac] = audit_df[ac].astype(str)
+          st.dataframe(audit_df, use_container_width=True)
 
         st.download_button(
             label="📥 정밀 정제 데이터 다운로드 (CSV)",
