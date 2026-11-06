@@ -14,7 +14,7 @@ with st.sidebar:
   st.header("🔑 API 설정")
   service_key = st.text_input(
       "공공데이터 일반 인증키 (Decoding 키)",
-      placeholder="인증키 붙여넣기",
+      value="ewFq4vtF6VE99JJ6B3hs9hD0YRssb4Y4p0KGSpLQsIkO5tSTNhauXB2y47pTnCu00ghthtujLk7cKBVQDzC0kg==",
       type="password",
   )
 
