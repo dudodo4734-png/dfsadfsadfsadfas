@@ -92,4 +92,93 @@ if st.button("🚀 데이터 전수 수집 및 분석 실행", use_container_wid
           time.sleep(0.1)
 
         # 데이터 가공 및 수치형 변환
-        df
+        df = pd.DataFrame(all_items)
+
+        # 문자열로 들어오는 연면적을 float 숫자로 강제 변환
+        if "totArea" in df.columns:
+          df["totArea"] = pd.to_numeric(df["totArea"], errors="coerce").fillna(0.0)
+        else:
+          df["totArea"] = 0.0
+
+        if "platArea" in df.columns:
+          df["platArea"] = pd.to_numeric(df["platArea"], errors="coerce").fillna(0.0)
+        else:
+          df["platArea"] = 0.0
+
+        # 노후도 계산
+        current_year = datetime.now().year
+
+        def calc_age(date_val):
+          if pd.isna(date_val) or str(date_val).strip() == "":
+            return None
+          d_str = str(date_val).strip()
+          if len(d_str) >= 4:
+            try:
+              b_year = int(d_str[:4])
+              return current_year - b_year
+            except:
+              return None
+          return None
+
+        if "useAprDay" in df.columns:
+          df["age"] = df["useAprDay"].apply(calc_age)
+        else:
+          df["age"] = None
+
+        df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
+
+        # 주요 지표 집계
+        total_bld_count = len(df)
+        total_gross_area_m2 = float(df["totArea"].sum())
+        total_gross_area_py = total_gross_area_m2 / 3.3058
+
+        valid_age_df = df[df["age"].notnull()]
+        old_count = int(df["is_old_30"].sum())
+        old_ratio = (old_count / len(valid_age_df) * 100) if len(valid_age_df) > 0 else 0.0
+
+        # 결과 화면 출력
+        st.subheader("📊 정비사업 기초 분석 결과")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("총 건축물 동수", f"{total_bld_count:,} 동")
+        m2.metric("종전 연면적 합계", f"{total_gross_area_m2:,.1f} ㎡")
+        m3.metric("종전 연면적 (평)", f"{total_gross_area_py:,.1f} 평")
+        m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_count}동 / {len(valid_age_df)}동")
+
+        # 테이블 뷰
+        display_cols = [
+            "platPlc",
+            "bldNm",
+            "mainPurpsCdNm",
+            "totArea",
+            "useAprDay",
+            "age",
+            "is_old_30",
+        ]
+        available_cols = [c for c in display_cols if c in df.columns]
+
+        st.dataframe(
+            df[available_cols].rename(
+                columns={
+                    "platPlc": "대지위치",
+                    "bldNm": "건물명",
+                    "mainPurpsCdNm": "주용도",
+                    "totArea": "연면적(㎡)",
+                    "useAprDay": "사용승인일",
+                    "age": "경과년수",
+                    "is_old_30": "30년노후여부",
+                }
+            ),
+            use_container_width=True,
+        )
+
+        # CSV 다운로드 버튼
+        csv = df.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            label="📥 수집 데이터 원본 다운로드 (CSV)",
+            data=csv,
+            file_name=f"건축물대장_{sigungu_cd}_{bjdong_cd}_{bun}.csv",
+            mime="text/csv",
+        )
+
+    except Exception as e:
+      st.error(f"오류가 발생했습니다: {e}")
