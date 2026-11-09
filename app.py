@@ -7,19 +7,13 @@ import time
 from datetime import datetime
 from urllib.parse import unquote
 
-st.set_page_config(page_title="정비사업 종전연면적 범용 조서기 (정밀진단형)", layout="wide")
-st.title("🏛️ 정비사업 종전연면적·노후도 범용 조서기")
+st.set_page_config(page_title="정비사업 종전연면적 범용 조서기 (간이 보정형)", layout="wide")
+st.title("🏛️ 정비사업 종전연면적·노후도 조서기")
 
-# ----------------------------------------------------
-# 1. 공공데이터 건축HUB API 키
-# ----------------------------------------------------
 SERVICE_KEY = "ewFq4vtF6VE99JJ6B3hs9hD0YRssb4Y4p0KGSpLQsIkO5tSTNhauXB2y47pTnCu00ghthtujLk7cKBVQDzC0kg=="
 CLEAN_KEY = unquote(SERVICE_KEY)
 BASE_URL = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
 
-# ----------------------------------------------------
-# 2. 전국 범용 지능형 파서
-# ----------------------------------------------------
 def parse_universal_data(text, input_sig="", input_bjd=""):
     sigungu = input_sig.strip()
     bjdong = input_bjd.strip()
@@ -50,37 +44,6 @@ def parse_universal_data(text, input_sig="", input_bjd=""):
         })
     return sigungu, bjdong, results
 
-# ----------------------------------------------------
-# 3. 누락 방지 건축HUB 전수 호출 엔진 (일반 0 + 산번지 1 자동 탐색)
-# ----------------------------------------------------
-def fetch_bld_info(sigungu, bjdong, bun, ji):
-    all_items = []
-    # 일반대지(0) 먼저 조회, 없으면 산번지(1) 추가 조회
-    for plat_gb in ["0", "1"]:
-        params = {
-            "serviceKey": CLEAN_KEY,
-            "sigunguCd": sigungu,
-            "bjdongCd": bjdong,
-            "platGbCd": plat_gb,
-            "bun": bun,
-            "ji": ji,
-            "numOfRows": 100,
-            "pageNo": 1,
-            "_type": "json"
-        }
-        try:
-            r = requests.get(BASE_URL, params=params, timeout=8)
-            items = r.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
-            if isinstance(items, dict):
-                all_items.append(items)
-            elif isinstance(items, list):
-                all_items.extend(items)
-        except Exception:
-            pass
-        if all_items:
-            break
-    return all_items
-
 def clean_and_aggregate_registers(raw_df):
     df = raw_df.copy()
     str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay", "ji", "bun", "pnu"]
@@ -94,7 +57,6 @@ def clean_and_aggregate_registers(raw_df):
     df["totArea"] = pd.to_numeric(df.get("totArea", 0), errors="coerce").fillna(0.0)
     df["vlRatEstmTotArea"] = pd.to_numeric(df.get("vlRatEstmTotArea", 0), errors="coerce").fillna(0.0)
 
-    # 필지별 정제: 총괄(2) 연면적이 살아있으면 총괄 채택, 없거나 0이면 동별(3)+일반(1) 전수 합산
     valid_indices = []
     group_col = "platPlc" if ("platPlc" in df.columns and df["platPlc"].str.strip().ne("").any()) else "pnu"
     grouped = df.groupby(group_col)
@@ -110,7 +72,7 @@ def clean_and_aggregate_registers(raw_df):
     return df.loc[valid_indices].copy()
 
 # ----------------------------------------------------
-# 4. 사용자 화면 구성
+# 사용자 화면 구성
 # ----------------------------------------------------
 col_meta1, col_meta2, col_meta3 = st.columns([2, 1, 1])
 with col_meta1:
@@ -124,13 +86,24 @@ raw_input_text = st.text_area(
     "📥 AI가 추출한 데이터 블록을 그대로 붙여넣으세요:",
     value="",
     placeholder="[행정구역] 11305, 10300\n[지번목록] 129-10, 129-14, 130-43 ...",
-    height=200
+    height=180
 )
 
+# 간이 보정 옵션 (핵심)
+st.markdown("### ⚙️ 간이 검토 옵션")
+c_opt1, c_opt2 = st.columns([1, 1])
+with c_opt1:
+    enable_estimate = st.checkbox("💡 [간이 모드] 대장 미조회(무허가/합필) 필지 추정 연면적 자동 보정", value=True)
+with c_opt2:
+    estimate_mode = st.radio("보정 방식 선택", ["구역 내 대장 있는 필지 평균 연면적 대입", "필지당 수동 연면적 직접 지정(평)"], horizontal=True)
+    custom_py = 120.0
+    if estimate_mode == "필지당 수동 연면적 직접 지정(평)":
+        custom_py = st.number_input("필지당 가산할 평균 연면적 (평)", value=120.0, step=10.0)
+
 # ----------------------------------------------------
-# 5. 실행 및 실시간 진단
+# 실행 및 집계
 # ----------------------------------------------------
-if st.button("🚀 건축물대장 수집 및 정밀 진단 조서 산출", use_container_width=True):
+if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_width=True):
     if not raw_input_text.strip():
         st.warning("붙여넣은 데이터가 없습니다.")
     else:
@@ -151,20 +124,40 @@ if st.button("🚀 건축물대장 수집 및 정밀 진단 조서 산출", use_
             st.info(f"행정코드 [{sig_code} / {bjd_code}] 적용 | 총 {total_p}개 필지에 대해 조회를 시작합니다.")
 
             all_records = []
-            zero_parcels = [] # 대장이 아예 안 나오는 필지 추적
+            zero_parcels = []
             prog = st.progress(0.0)
             status_box = st.empty()
 
             for idx, item in enumerate(query_list):
                 status_box.text(f"대장 수집 중 ({idx+1}/{total_p}): {item['label']}번지")
-                items = fetch_bld_info(item["sigungu"], item["bjdong"], item["bun"], item["ji"])
-                
-                if items:
-                    for it in items:
-                        it["pnu"] = item["pnu"]
-                        it["query_label"] = item["label"]
-                        all_records.append(it)
-                else:
+                params = {
+                    "serviceKey": CLEAN_KEY,
+                    "sigunguCd": item["sigungu"],
+                    "bjdongCd": item["bjdong"],
+                    "platGbCd": "0",
+                    "bun": item["bun"],
+                    "ji": item["ji"],
+                    "numOfRows": 100,
+                    "pageNo": 1,
+                    "_type": "json"
+                }
+                found = False
+                try:
+                    r = requests.get(BASE_URL, params=params, timeout=8)
+                    items = r.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+                    if isinstance(items, dict):
+                        items["pnu"] = item["pnu"]
+                        all_records.append(items)
+                        found = True
+                    elif isinstance(items, list) and items:
+                        for it in items:
+                            it["pnu"] = item["pnu"]
+                            all_records.append(it)
+                        found = True
+                except Exception:
+                    pass
+
+                if not found:
                     zero_parcels.append(item["label"])
 
                 prog.progress((idx + 1) / total_p)
@@ -193,10 +186,22 @@ if st.button("🚀 건축물대장 수집 및 정밀 진단 조서 산출", use_
                 df["age"] = df["useAprDay"].apply(calc_age) if "useAprDay" in df.columns else None
                 df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
 
-                tot_m2 = float(df["totArea"].sum())
-                tot_py = tot_m2 / 3.3058
-                vl_m2 = float(df["vlRatEstmTotArea"].sum())
-                vl_py = vl_m2 / 3.3058
+                raw_tot_m2 = float(df["totArea"].sum())
+                raw_vl_m2 = float(df["vlRatEstmTotArea"].sum())
+
+                # 간이 보정 계산 로직
+                est_m2 = 0.0
+                if enable_estimate and zero_parcels:
+                    if estimate_mode == "구역 내 대장 있는 필지 평균 연면적 대입":
+                        avg_m2_per_parcel = raw_tot_m2 / (total_p - len(zero_parcels)) if (total_p - len(zero_parcels)) > 0 else 0
+                        est_m2 = avg_m2_per_parcel * len(zero_parcels)
+                    else:
+                        est_m2 = (custom_py * 3.3058) * len(zero_parcels)
+
+                final_tot_m2 = raw_tot_m2 + est_m2
+                final_tot_py = final_tot_m2 / 3.3058
+                final_vl_m2 = raw_vl_m2 + (est_m2 * 0.9) # 간이 용적률 면적(90% 추정)
+                final_vl_py = final_vl_m2 / 3.3058
 
                 valid_age = df[df["age"].notnull()]
                 old_cnt = int(df["is_old_30"].sum())
@@ -205,19 +210,19 @@ if st.button("🚀 건축물대장 수집 및 정밀 진단 조서 산출", use_
                 st.markdown("---")
                 st.subheader(f"📊 {display_title} 종전연면적 및 노후도 최종 집계표")
 
+                if enable_estimate and zero_parcels:
+                    st.success(f"✨ **간이 보정 적용 완료**: 대장 정상 필지({total_p - len(zero_parcels)}개)에서 산출된 {raw_tot_m2:,.0f}㎡에 미등재/합필 필지({len(zero_parcels)}개)의 추정 연면적 {est_m2:,.0f}㎡를 가산했습니다.")
+
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("실물 건축물 동수", f"{refined_cnt:,} 동", f"원천 대장 {raw_cnt}건")
-                m2.metric("순수 종전연면적", f"{tot_m2:,.1f} ㎡", f"{tot_py:,.1f} 평")
-                m3.metric("용적률산정용 연면적", f"{vl_m2:,.1f} ㎡", f"{vl_py:,.1f} 평")
+                m1.metric("실물 건축물 동수", f"{refined_cnt:,} 동 (+{len(zero_parcels)}필지 보정)")
+                m2.metric("최종 종전연면적", f"{final_tot_m2:,.1f} ㎡", f"{final_tot_py:,.1f} 평")
+                m3.metric("용적률산정용 연면적", f"{final_vl_m2:,.1f} ㎡", f"{final_vl_py:,.1f} 평")
                 m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
 
-                # 대장 누락 필지 즉각 알림
                 if zero_parcels:
-                    st.error(f"⚠️ **건축물대장이 0건으로 조회된 필지 ({len(zero_parcels)}개)**: {', '.join(zero_parcels)}")
-                    st.caption("※ 나대지/도로이거나, 무허가건축물이 위치했거나, 인접 대표지번에 합필 등재된 필지입니다. 수작업 조서와 비교 시 이 필지들의 연면적을 확인하세요.")
+                    st.warning(f"⚠️ 대장 미조회 필지 ({len(zero_parcels)}개): {', '.join(zero_parcels)}")
 
                 t1, t2 = st.tabs(["📑 19자리 PNU 지번별 소계 조서", "📋 대장 원천 상세 데이터"])
-
                 with t1:
                     summary = df.groupby(["pnu", "platPlc"]).agg(
                         동수=("totArea", "count"),
@@ -226,18 +231,9 @@ if st.button("🚀 건축물대장 수집 및 정밀 진단 조서 산출", use_
                         건물명=("bldNm", lambda x: ", ".join([str(v) for v in x if str(v).strip() != ""]))
                     ).reset_index()
                     summary["연면적_평"] = (summary["연면적_m2"] / 3.3058).round(1)
-                    summary["용적률면적_평"] = (summary["용적률면적_m2"] / 3.3058).round(1)
-
                     st.dataframe(summary, use_container_width=True)
 
                 with t2:
                     disp_cols = ["pnu", "platPlc", "bldNm", "regstrKindCdNm", "totArea", "vlRatEstmTotArea", "useAprDay", "age", "is_old_30"]
                     avail = [c for c in disp_cols if c in df.columns]
                     st.dataframe(df[avail], use_container_width=True)
-
-                st.download_button(
-                    label=f"📥 {display_title}_정밀조서_다운로드.csv",
-                    data=df.to_csv(index=False, encoding="utf-8-sig"),
-                    file_name=f"{display_title}_종전연면적조서.csv",
-                    mime="text/csv"
-                )
