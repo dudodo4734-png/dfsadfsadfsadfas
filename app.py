@@ -7,8 +7,8 @@ import time
 from datetime import datetime
 from urllib.parse import unquote
 
-st.set_page_config(page_title="정비사업 범용 종전연면적 조서기", layout="wide")
-st.title("🏛️ 정비사업 실무형 종전연면적·노후도 범용 조서기")
+st.set_page_config(page_title="정비사업 통합 종전연면적 조서기", layout="wide")
+st.title("🏛️ 정비사업 실무형 종전연면적·노후도 조서기")
 
 # ----------------------------------------------------
 # 1. 공공데이터 인증키 설정 (건축HUB + 행안부 주소)
@@ -21,20 +21,22 @@ JUSO_API_URL = "https://business.juso.go.kr/addrlink/addrLinkApi.do"
 JUSO_KEY = "U01TX0FVVEgyMDI0MDkyMjIzNDQxNjExNTEwNjQ="
 
 with st.sidebar:
-    st.header("📌 전국 범용 조서 시스템")
+    st.header("📌 사용 안내")
     st.markdown("""
-    **어떤 데이터든 자동 판별 지원**:
-    - **도로명주소**: `진흥로15길 12-4` 형태
-    - **도로명 결합**: 기준 도로명 지정 시 `12-4, 18-2` 번호만 입력 가능
-    - **지번/PNU**: 19자리 PNU 또는 `[행정구역] + 지번목록`
-    
-    *※ 행안부 주소 DB를 통해 공인 19자리 PNU와 법정동 지번을 실시간 자동 매핑합니다.*
+    **완전 범용 다중 도로명 처리**:
+    - `진흥로15길 12-4`, `통일로 10` 등 여러 도로명이 섞여 있어도 자동 분류
+    - 입력된 텍스트를 행정안전부 공식 주소 DB와 1차 대조하여 **진짜 법정동 지번 및 19자리 PNU** 자동 산출
+    - 이후 국토부 건축HUB 대장을 호출하므로 지번 오인식 원천 차단
     """)
 
 # ----------------------------------------------------
-# 2. 엔진: 도로명 ➔ 공인 지번/PNU 실시간 변환
+# 2. 엔진: 도로명/주소 ➔ 공인 지번 및 19자리 PNU 실시간 매핑
 # ----------------------------------------------------
-def resolve_road_to_jibun(query_text):
+def resolve_to_pnu_and_jibun(query_text):
+    """
+    행정안전부 도로명주소 API를 호출하여 입력 텍스트(도로명주소 또는 건물명)로부터
+    공인 법정동 시군구코드(5), 법정동코드(5), 본번(4), 부번(4), 19자리 PNU를 확정 반환
+    """
     params = {
         "confmKey": JUSO_KEY,
         "currentPage": 1,
@@ -83,7 +85,7 @@ def clean_and_aggregate_registers(raw_df):
     df["vlRatEstmTotArea"] = pd.to_numeric(df.get("vlRatEstmTotArea", 0), errors="coerce").fillna(0.0)
     df["platArea"] = pd.to_numeric(df.get("platArea", 0), errors="coerce").fillna(0.0)
 
-    # 총괄표제부(2) 존재 시 동별표제부(3) 중복 배제
+    # 총괄표제부(2) 우선 반영 (동별표제부 중복 배제)
     valid_indices = []
     grouped = df.groupby("platPlc")
 
@@ -99,104 +101,69 @@ def clean_and_aggregate_registers(raw_df):
     return df.loc[valid_indices].copy()
 
 # ----------------------------------------------------
-# 3. 사용자 화면 구성 (어떤 입력이든 수용 가능한 UI)
+# 3. 사용자 화면 구성 (기준 도로명 칸 제거, 순수 단일 입력창)
 # ----------------------------------------------------
-col_meta1, col_meta2 = st.columns([1, 2])
-with col_meta1:
-    zone_name = st.text_input("구역명 (임의 입력)", value="", placeholder="예: 구역명 / 사업지명")
-    base_road = st.text_input(
-        "기준 도로명 (선택)",
-        value="",
-        placeholder="예: 진흥로15길, 봉은사로 등",
-        help="도면에 도로명이 하나일 경우 여기에 적어두면, 우측 텍스트창에는 '12-4, 18-2' 번호만 적어도 자동 인식합니다."
-    )
+zone_name = st.text_input("구역명 (임의 입력)", value="", placeholder="예: 불광8구역")
 
-with col_meta2:
-    raw_input_text = st.text_area(
-        "📥 AI 대화창에서 추출한 데이터를 그대로 붙여넣으세요:",
-        value="",
-        placeholder="[모든 입력 형태 자동 지원]\n\n1. 도로명 풀주소: 진흥로15길 12-4, 진흥로15길 18-2 ...\n2. 기준 도로명이 있을 때: 12-4, 18-2, 22-11 ...\n3. 지번/PNU 포맷: [행정구역] 11380, 10300 / [지번목록] 12-4 ...\n\n(콤마, 줄바꿈, 엑셀 열 복사 전부 지원)",
-        height=180
-    )
+raw_input_text = st.text_area(
+    "📥 AI가 추출해 준 데이터 텍스트를 그대로 붙여넣으세요:",
+    value="",
+    placeholder="여러 도로명이 섞여 있어도 그대로 넣으시면 됩니다.\n\n[입력 예시]\n진흥로15길 12-4, 진흥로15길 18-2, 진흥로15길 22-11\n통일로78길 5, 통일로78길 7-1\n진흥로 215, 진흥로 217\n(또는 19자리 공인 PNU 목록)",
+    height=200
+)
 
 # ----------------------------------------------------
-# 4. 실시간 매핑 및 대장 전수 수집 파이프라인
+# 4. 실시간 주소 해석 및 건축HUB 대장 수집 파이프라인
 # ----------------------------------------------------
-if st.button("🚀 주소 매핑 및 종전연면적 조서 산출", use_container_width=True):
+if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_width=True):
     if not raw_input_text.strip():
         st.warning("붙여넣은 데이터가 없습니다.")
     else:
         display_title = zone_name.strip() if zone_name.strip() else "대상구역"
-        
-        # 1. 19자리 PNU 직접 입력 감지
-        pnu_matches = list(set(re.findall(r'\b\d{19}\b', raw_input_text)))
-        
-        # 2. [행정구역] 코드 감지
-        code_match = re.search(r'(\d{5})[\s,]+(\d{5})', raw_input_text)
-        
-        targets_to_query = []
         status_box = st.empty()
         prog = st.progress(0.0)
 
-        # 케이스 A: 19자리 PNU 목록인 경우
+        # 1순위: 19자리 PNU 직입력 감지
+        pnu_matches = list(set(re.findall(r'\b\d{19}\b', raw_input_text)))
+
+        targets_to_query = []
+
         if pnu_matches:
             for p in pnu_matches:
                 targets_to_query.append({
                     "sigungu": p[:5], "bjdong": p[5:10], "bun": p[11:15], "ji": p[15:19],
                     "pnu": p, "roadAddr": "", "jibunAddr": ""
                 })
-        # 케이스 B: 행정코드 2개 + 지번목록인 경우
-        elif code_match:
-            sig = code_match.group(1)
-            bjd = code_match.group(2)
-            tokens = re.findall(r'\b\d+(?:-\d+)?\b', raw_input_text)
-            for tok in tokens:
-                if len(tok) == 5 and "-" not in tok:
-                    continue
-                if "-" in tok:
-                    parts = tok.split("-")
-                    b, j = parts[0].zfill(4), parts[1].zfill(4)
-                else:
-                    b, j = tok.zfill(4), "0000"
-                p = f"{sig}{bjd}1{b}{j}"
-                targets_to_query.append({
-                    "sigungu": sig, "bjdong": bjd, "bun": b, "ji": j,
-                    "pnu": p, "roadAddr": "", "jibunAddr": ""
-                })
-        # 케이스 C: 도로명 번호 또는 건물명 목록인 경우 (행안부 주소엔진 가동)
         else:
+            # 2순위: 콤마, 줄바꿈, 세미콜론 등으로 구분된 개별 주소 항목 분리
             items = re.split(r'[\n,;\t]+', raw_input_text.strip())
             raw_items = [it.strip() for it in items if it.strip()]
-            
-            st.info(f"도로명 건물번호 {len(raw_items)}개 감지: 행안부 주소 DB를 통해 실제 지번 및 19자리 PNU로 변환합니다.")
-            
+
+            st.info(f"총 {len(raw_items)}개 항목 감지: 행정안전부 주소 DB를 통해 실제 법정동 지번 및 19자리 PNU로 정밀 매핑합니다.")
+
             resolved_dict = {}
             for idx, item in enumerate(raw_items):
-                query = item
-                if base_road.strip() and ("길" not in item and "로" not in item and "동" not in item):
-                    query = f"{base_road.strip()} {item}"
-                
-                status_box.text(f"[1/2 주소변환] {query} ➔ 공인 지번 조회 중")
-                res_addr = resolve_road_to_jibun(query)
+                status_box.text(f"[1/2단계: 공인 주소/지번 매핑] {item}")
+                res_addr = resolve_to_pnu_and_jibun(item)
                 if res_addr and res_addr["pnu"] not in resolved_dict:
                     resolved_dict[res_addr["pnu"]] = res_addr
-                
+
                 prog.progress((idx + 1) / (len(raw_items) * 2))
                 time.sleep(0.01)
-                
+
             targets_to_query = list(resolved_dict.values())
 
-        # 최종 대장 호출 단계
         if not targets_to_query:
             status_box.empty()
             prog.empty()
-            st.error("유효한 주소 또는 지번을 식별할 수 없습니다. 입력값을 확인해 주세요.")
+            st.error("입력한 주소에서 공인 지번 정보를 찾지 못했습니다. 도로명칭이 올바르게 포함되어 있는지 확인해 주세요.")
         else:
+            # 2단계: 국토부 건축HUB 대장 수집
             total_targets = len(targets_to_query)
             all_records = []
 
             for idx, p_info in enumerate(targets_to_query):
-                status_box.text(f"[2/2 대장수집] ({idx+1}/{total_targets}) 본번 {int(p_info['bun'])}-부번 {int(p_info['ji'])}")
+                status_box.text(f"[2/2단계: 건축HUB 대장 수집] ({idx+1}/{total_targets}) {p_info.get('jibunAddr', p_info['pnu'])}")
                 params = {
                     "serviceKey": CLEAN_BLD_KEY,
                     "sigunguCd": p_info["sigungu"],
@@ -211,7 +178,7 @@ if st.button("🚀 주소 매핑 및 종전연면적 조서 산출", use_contain
                 try:
                     r = requests.get(BASE_BLD_URL, params=params, timeout=8)
                     items_res = r.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
-                    
+
                     if isinstance(items_res, dict):
                         items_res["pnu"] = p_info["pnu"]
                         items_res["roadAddr"] = p_info.get("roadAddr", "")
@@ -231,16 +198,16 @@ if st.button("🚀 주소 매핑 및 종전연면적 조서 산출", use_contain
             prog.empty()
 
             if not all_records:
-                st.warning("건축HUB에서 대장 정보를 찾을 수 없습니다. 법정동 코드 및 지번을 확인해 주세요.")
+                st.warning("건축물대장에서 건축물 정보를 조회할 수 없습니다.")
             else:
                 df_raw = pd.DataFrame(all_records)
                 raw_cnt = len(df_raw)
 
-                # 위계 정제
+                # 총괄-동별 위계 정제
                 df = clean_and_aggregate_registers(df_raw)
                 refined_cnt = len(df)
 
-                # 노후도 계산
+                # 30년 이상 노후도 계산
                 current_year = datetime.now().year
                 def calc_age(d):
                     if pd.isna(d) or str(d).strip() == "":
@@ -277,7 +244,7 @@ if st.button("🚀 주소 매핑 및 종전연면적 조서 산출", use_contain
                 m3.metric("용적률산정용 연면적", f"{vl_m2:,.1f} ㎡", f"{vl_py:,.1f} 평")
                 m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
 
-                t1, t2 = st.tabs(["📑 19자리 PNU·지번별 소계 조서", "📋 대장 원천 상세 데이터"])
+                t1, t2 = st.tabs(["📑 19자리 PNU·법정동 지번 조서", "📋 대장 원천 상세 데이터"])
 
                 with t1:
                     summary = df.groupby(["pnu", "platPlc"]).agg(
@@ -293,7 +260,7 @@ if st.button("🚀 주소 매핑 및 종전연면적 조서 산출", use_contain
                     st.dataframe(
                         summary.rename(columns={
                             "pnu": "19자리 공인 PNU",
-                            "platPlc": "실제 법정동 대지위치",
+                            "platPlc": "실제 법정동 대지위치(지번)",
                             "연면적_m2": "연면적(㎡)",
                             "연면적_평": "연면적(평)",
                             "용적률면적_m2": "용적률면적(㎡)"
