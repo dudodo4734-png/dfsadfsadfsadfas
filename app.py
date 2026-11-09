@@ -18,17 +18,13 @@ CLEAN_KEY = unquote(SERVICE_KEY)
 BASE_URL = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
 
 # ----------------------------------------------------
-# 2. 전국 범용 지능형 파서 & 대장 위계 정제
+# 2. 전국 범용 지능형 파서 & 누락 방지 대장 정제 엔진
 # ----------------------------------------------------
 def parse_universal_data(text, input_sig="", input_bjd=""):
-    """
-    텍스트 내에서 [행정구역] 5자리 코드 2개 및 지번들을 추출.
-    텍스트에 행정코드가 없으면 화면 입력값을 사용.
-    """
     sigungu = input_sig.strip()
     bjdong = input_bjd.strip()
 
-    # 1. 텍스트 내 행정구역 5자리 코드 2개 탐색 (예: [행정구역] 11380, 10300 등)
+    # 1. 텍스트 내 행정구역 5자리 코드 2개 탐색
     code_match = re.search(r'(\d{5})[\s,]+(\d{5})', text)
     if code_match:
         sigungu = code_match.group(1)
@@ -44,7 +40,6 @@ def parse_universal_data(text, input_sig="", input_bjd=""):
             })
         return sigungu, bjdong, results
 
-    # 일반 본번-부번 토큰 추출
     tokens = re.findall(r'\b\d+(?:-\d+)?\b', text)
     parcels = []
     for tok in tokens:
@@ -68,6 +63,12 @@ def parse_universal_data(text, input_sig="", input_bjd=""):
     return sigungu, bjdong, results
 
 def clean_and_aggregate_registers(raw_df):
+    """
+    모아타운/빌라 밀집지 누락 방지 핵심 알고리즘:
+    1. 총괄표제부(2)가 존재하고 실제 totArea > 0 인 경우에만 총괄표제부 적용
+    2. 총괄표제부의 totArea가 0이거나 비어있는 경우: 동별표제부(3)의 실연면적 전수 합산
+    3. 총괄이 없는 일반 필지는 일반표제부(1) 및 동별표제부(3) 정상 전수 합산
+    """
     df = raw_df.copy()
     str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay", "ji", "bun", "pnu"]
     for col in str_cols:
@@ -81,27 +82,29 @@ def clean_and_aggregate_registers(raw_df):
     df["vlRatEstmTotArea"] = pd.to_numeric(df.get("vlRatEstmTotArea", 0), errors="coerce").fillna(0.0)
     df["platArea"] = pd.to_numeric(df.get("platArea", 0), errors="coerce").fillna(0.0)
 
-    # 총괄표제부(2) 우선 반영 (동별표제부 중복 배제)
     valid_indices = []
-    grouped = df.groupby("platPlc")
+    group_col = "platPlc" if ("platPlc" in df.columns and df["platPlc"].str.strip().ne("").any()) else "pnu"
+    grouped = df.groupby(group_col)
 
-    for plat_plc, group in grouped:
-        has_summary = (group["regstrKindCd"] == "2").any()
-        if has_summary:
-            summary_rows = group[group["regstrKindCd"] == "2"]
+    for plat_key, group in grouped:
+        summary_rows = group[group["regstrKindCd"] == "2"]
+        
+        # 총괄표제부의 실제 연면적이 0보다 큰 경우에만 총괄을 우선 반영
+        if not summary_rows.empty and summary_rows["totArea"].sum() > 0:
             valid_indices.extend(summary_rows.index.tolist())
         else:
-            normal_rows = group[group["regstrKindCd"].isin(["1", "3", ""])]
-            valid_indices.extend(normal_rows.index.tolist())
+            # 총괄 연면적이 0이거나 총괄이 없는 경우 -> 동별표제부(3)와 일반표제부(1) 전수 합산
+            detail_rows = group[group["regstrKindCd"].isin(["1", "3", ""])]
+            valid_indices.extend(detail_rows.index.tolist())
 
     return df.loc[valid_indices].copy()
 
 # ----------------------------------------------------
-# 3. 사용자 화면 구성 (하드코딩 0% 백지 UI)
+# 3. 사용자 화면 구성
 # ----------------------------------------------------
 col_meta1, col_meta2, col_meta3 = st.columns([2, 1, 1])
 with col_meta1:
-    zone_name = st.text_input("구역명 (보고서 제목용)", value="", placeholder="예: 구역명 입력")
+    zone_name = st.text_input("구역명 (보고서 제목용)", value="", placeholder="예: 수유동 모아타운 사업지")
 with col_meta2:
     manual_sig = st.text_input("시군구코드 (5자리)", value="", placeholder="텍스트에 없을 때만 입력")
 with col_meta3:
@@ -110,7 +113,7 @@ with col_meta3:
 raw_input_text = st.text_area(
     "📥 AI가 추출한 데이터 블록을 그대로 붙여넣으세요:",
     value="",
-    placeholder="AI가 제공한 텍스트를 그대로 Ctrl+V 하세요.\n\n[지원 형식]\n1. [행정구역] 시군구5자리, 법정동5자리 / [지번목록] 본번-부번, ...\n2. 순수 지번 리스트 (상단에 시군구/법정동코드 입력 시)\n3. 19자리 공인 PNU 리스트",
+    placeholder="AI가 제공한 텍스트를 그대로 Ctrl+V 하세요.\n\n[입력 예시]\n[행정구역] 11305, 10300\n[지번목록] 129-10, 129-14, 130-43 ...",
     height=220
 )
 
@@ -128,7 +131,6 @@ if st.button("🚀 건축물대장 수집 및 조서 산출", use_container_widt
         elif not query_list:
             st.warning("인식된 지번 데이터가 없습니다.")
         else:
-            # PNU 재보완
             for it in query_list:
                 if not it["sigungu"]:
                     it["sigungu"] = sig_code
@@ -185,6 +187,7 @@ if st.button("🚀 건축물대장 수집 및 조서 산출", use_container_widt
                 df_raw = pd.DataFrame(all_records)
                 raw_cnt = len(df_raw)
 
+                # 누락 방지 정제 실행
                 df = clean_and_aggregate_registers(df_raw)
                 refined_cnt = len(df)
 
@@ -216,7 +219,7 @@ if st.button("🚀 건축물대장 수집 및 조서 산출", use_container_widt
                 st.subheader(f"📊 {display_title} 종전연면적 및 노후도 최종 집계표")
 
                 if raw_cnt != refined_cnt:
-                    st.info(f"💡 대장 위계 정제: 원천 대장 {raw_cnt}건 중 총괄-동별 중복 {raw_cnt - refined_cnt}건을 배제하고 실물 {refined_cnt}동 기준으로 산출했습니다.")
+                    st.info(f"💡 대장 위계 정제: 원천 대장 {raw_cnt}건 중 총괄 연면적 0인 가짜 표제부를 걸러내고 실물 {refined_cnt}동 기준으로 정상 합산했습니다.")
 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("실물 건축물 동수", f"{refined_cnt:,} 동", f"원천 대장 {raw_cnt}건")
