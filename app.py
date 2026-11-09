@@ -7,8 +7,8 @@ import time
 from datetime import datetime
 from urllib.parse import unquote
 
-st.set_page_config(page_title="정비사업 종전연면적 복붙 조서기", layout="wide")
-st.title("📋 정비사업 실무형 종전연면적·노후도 조서기")
+st.set_page_config(page_title="정비사업 종전연면적 정밀 조서기", layout="wide")
+st.title("🏛️ 정비사업 실무형 종전연면적·노후도 조서기")
 
 # ----------------------------------------------------
 # 1. 시스템 환경 설정 (디코딩 키 내장)
@@ -18,12 +18,13 @@ CLEAN_KEY = unquote(SERVICE_KEY)
 BASE_URL = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
 
 with st.sidebar:
-    st.header("⚙️ 사용 방법")
+    st.header("📌 실무 워크플로우")
     st.info("""
-    1. AI 대화창에 도면 캡처본 전달
-    2. AI가 뽑아준 **지번 텍스트 복사**
-    3. 본 화면 텍스트창에 **붙여넣기**
-    4. [조서 산출] 클릭
+    1. 대화창에 도면 캡처본 투입
+    2. AI가 알려준 **시군구/법정동 코드** 입력
+    3. 원하는 **구역명** 직접 타이핑
+    4. AI가 추출한 **지번 텍스트 붙여넣기**
+    5. **[조서 산출]** 클릭
     """)
 
 # ----------------------------------------------------
@@ -43,7 +44,7 @@ def clean_and_aggregate_registers(raw_df):
     df["vlRatEstmTotArea"] = pd.to_numeric(df.get("vlRatEstmTotArea", 0), errors="coerce").fillna(0.0)
     df["platArea"] = pd.to_numeric(df.get("platArea", 0), errors="coerce").fillna(0.0)
 
-    # 총괄표제부(2) 우선 정제
+    # 총괄표제부(2) 우선 정제: 총괄 존재 시 동별(3) 배제
     valid_indices = []
     grouped = df.groupby("platPlc")
 
@@ -75,41 +76,43 @@ def parse_parcel_text(text):
     return list(dict.fromkeys(results))
 
 # ----------------------------------------------------
-# 3. 사용자 입력 인터페이스
+# 3. 사용자 입력 화면 구성
 # ----------------------------------------------------
-col_meta1, col_meta2, col_meta3 = st.columns(3)
-with col_meta1:
-    in_sigungu = st.text_input("시군구코드 (5자리)", value="11380", help="은평구: 11380, 성동구: 11200")
-with col_meta2:
-    in_bjdong = st.text_input("법정동코드 (5자리)", value="10300", help="불광동: 10300, 성수동1가: 10600")
-with col_meta3:
-    in_zone_nm = st.text_input("구역명", value="불광8구역")
+st.subheader("1️⃣ 사업지 기본 정보 입력")
 
-default_input_text = "281-9, 281-10, 281-15, 281-16, 281-19, 281-20, 281-22, 281-24, 281-25, 281-26, 281-27, 281-28, 281-29, 281-30, 281-37, 281-38, 281-45, 281-48, 281-52, 281-61, 281-62, 281-65, 281-70, 281-72"
+c1, c2, c3 = st.columns(3)
+with c1:
+    in_sigungu = st.text_input("시군구코드 (AI 제공 5자리)", value="11380", help="예: 은평구 11380, 성동구 11200")
+with c2:
+    in_bjdong = st.text_input("법정동코드 (AI 제공 5자리)", value="10300", help="예: 불광동 10300, 성수동1가 10600")
+with c3:
+    in_zone_nm = st.text_input("구역명 (실무자 직접 입력)", value="불광8구역")
 
+st.subheader("2️⃣ AI 추출 지번 목록 붙여넣기")
 raw_parcels = st.text_area(
-    "📥 AI가 뱉어준 지번 텍스트를 그대로 붙여넣으세요:",
-    value=default_input_text,
-    height=140
+    "지번 텍스트 (콤마, 줄바꿈, 띄어쓰기 자동 파싱)",
+    value="281-9, 281-10, 281-15, 281-16, 281-19, 281-20, 281-22, 281-24, 281-25, 281-26, 281-27, 281-28, 281-29, 281-30, 281-37, 281-38, 281-45, 281-48, 281-52, 281-61, 281-62, 281-65, 281-70, 281-72",
+    height=130,
+    help="AI가 대화창에서 제공한 텍스트 덩어리를 그대로 복사해 넣으세요."
 )
 
 # ----------------------------------------------------
-# 4. 수집 및 조서 생성
+# 4. 건축HUB 전수 수집 및 검증 조서 산출
 # ----------------------------------------------------
 if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_width=True):
     target_tuples = parse_parcel_text(raw_parcels)
-    
+
     if not target_tuples:
-        st.warning("입력된 지번이 없습니다.")
+        st.warning("입력된 지번이 없습니다. 지번을 붙여넣어 주세요.")
     else:
-        st.info(f"총 {len(target_tuples)}개 필지에 대한 건축HUB 대장을 호출합니다.")
-        
+        st.info(f"선별된 총 {len(target_tuples)}개 필지에 대해 건축물대장을 수집합니다.")
+
         all_records = []
         prog = st.progress(0.0)
         status_box = st.empty()
 
         for idx, (b, j) in enumerate(target_tuples):
-            status_box.text(f"대장 수집 중 ({idx+1}/{len(target_tuples)}): {int(b)}-{int(j)}")
+            status_box.text(f"대장 수집 중 ({idx+1}/{len(target_tuples)}): 본번 {int(b)}-부번 {int(j)}")
             params = {
                 "serviceKey": CLEAN_KEY,
                 "sigunguCd": in_sigungu.strip(),
@@ -125,7 +128,7 @@ if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_w
                 r = requests.get(BASE_URL, params=params, timeout=8)
                 res_json = r.json()
                 items = res_json.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-                
+
                 pnu_code = f"{in_sigungu.strip()}{in_bjdong.strip()}1{b}{j}"
                 if isinstance(items, dict):
                     items["pnu"] = pnu_code
@@ -144,15 +147,16 @@ if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_w
         prog.empty()
 
         if not all_records:
-            st.warning("조회된 건축물대장이 없습니다.")
+            st.warning("조회된 건축물대장이 없습니다. 행정코드 및 지번을 확인해 주세요.")
         else:
             df_raw = pd.DataFrame(all_records)
             raw_cnt = len(df_raw)
 
+            # 총괄-동별 위계 정제
             df = clean_and_aggregate_registers(df_raw)
             refined_cnt = len(df)
 
-            # 노후도 계산
+            # 노후도(30년) 판정
             current_year = datetime.now().year
             def calc_age(d):
                 if pd.isna(d) or str(d).strip() == "":
@@ -180,8 +184,11 @@ if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_w
             st.markdown("---")
             st.subheader(f"📊 {in_zone_nm} 종전연면적 및 노후도 최종 집계표")
 
+            if raw_cnt != refined_cnt:
+                st.info(f"💡 위계 정제: 원천 대장 {raw_cnt}건 중 총괄-동별 중복 {raw_cnt - refined_cnt}건을 배제하고 실물 {refined_cnt}동 기준으로 산출했습니다.")
+
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("실물 건축물 동수", f"{refined_cnt:,} 동", f"원천 {raw_cnt}건")
+            m1.metric("실물 건축물 동수", f"{refined_cnt:,} 동", f"원천 대장 {raw_cnt}건")
             m2.metric("순수 종전연면적", f"{tot_m2:,.1f} ㎡", f"{tot_py:,.1f} 평")
             m3.metric("용적률산정용 연면적", f"{vl_m2:,.1f} ㎡", f"{vl_py:,.1f} 평")
             m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
