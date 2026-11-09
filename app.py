@@ -7,13 +7,19 @@ import time
 from datetime import datetime
 from urllib.parse import unquote
 
-st.set_page_config(page_title="정비사업 종전연면적 범용 조서기 (간이 보정형)", layout="wide")
+st.set_page_config(page_title="정비사업 종전연면적 조서기 (검증·수기보완형)", layout="wide")
 st.title("🏛️ 정비사업 종전연면적·노후도 조서기")
 
+# ----------------------------------------------------
+# 1. 공공데이터 건축HUB API 키
+# ----------------------------------------------------
 SERVICE_KEY = "ewFq4vtF6VE99JJ6B3hs9hD0YRssb4Y4p0KGSpLQsIkO5tSTNhauXB2y47pTnCu00ghthtujLk7cKBVQDzC0kg=="
 CLEAN_KEY = unquote(SERVICE_KEY)
 BASE_URL = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
 
+# ----------------------------------------------------
+# 2. 범용 지능형 파서 & 대장 위계 정제
+# ----------------------------------------------------
 def parse_universal_data(text, input_sig="", input_bjd=""):
     sigungu = input_sig.strip()
     bjdong = input_bjd.strip()
@@ -38,15 +44,15 @@ def parse_universal_data(text, input_sig="", input_bjd=""):
     results = []
     for b, j in unique_parcels:
         pnu = f"{sigungu}{bjdong}1{b}{j}" if (sigungu and bjdong) else ""
+        label = f"{int(b)}-{int(j)}" if int(j) > 0 else f"{int(b)}"
         results.append({
-            "sigungu": sigungu, "bjdong": bjdong, "bun": b, "ji": j, "pnu": pnu,
-            "label": f"{int(b)}-{int(j)}" if int(j) > 0 else f"{int(b)}"
+            "sigungu": sigungu, "bjdong": bjdong, "bun": b, "ji": j, "pnu": pnu, "label": label
         })
     return sigungu, bjdong, results
 
 def clean_and_aggregate_registers(raw_df):
     df = raw_df.copy()
-    str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay", "ji", "bun", "pnu"]
+    str_cols = ["mgmBldrgstPk", "bldNm", "platPlc", "regstrKindCd", "regstrKindCdNm", "mainPurpsCdNm", "useAprDay", "ji", "bun", "pnu", "query_label"]
     for col in str_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).fillna("")
@@ -72,7 +78,7 @@ def clean_and_aggregate_registers(raw_df):
     return df.loc[valid_indices].copy()
 
 # ----------------------------------------------------
-# 사용자 화면 구성
+# 3. 사용자 화면 구성
 # ----------------------------------------------------
 col_meta1, col_meta2, col_meta3 = st.columns([2, 1, 1])
 with col_meta1:
@@ -89,21 +95,10 @@ raw_input_text = st.text_area(
     height=180
 )
 
-# 간이 보정 옵션 (핵심)
-st.markdown("### ⚙️ 간이 검토 옵션")
-c_opt1, c_opt2 = st.columns([1, 1])
-with c_opt1:
-    enable_estimate = st.checkbox("💡 [간이 모드] 대장 미조회(무허가/합필) 필지 추정 연면적 자동 보정", value=True)
-with c_opt2:
-    estimate_mode = st.radio("보정 방식 선택", ["구역 내 대장 있는 필지 평균 연면적 대입", "필지당 수동 연면적 직접 지정(평)"], horizontal=True)
-    custom_py = 120.0
-    if estimate_mode == "필지당 수동 연면적 직접 지정(평)":
-        custom_py = st.number_input("필지당 가산할 평균 연면적 (평)", value=120.0, step=10.0)
-
 # ----------------------------------------------------
-# 실행 및 집계
+# 4. 데이터 수집 및 상태 저장
 # ----------------------------------------------------
-if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_width=True):
+if st.button("🚀 건축물대장 수집 및 기본 조서 생성", use_container_width=True):
     if not raw_input_text.strip():
         st.warning("붙여넣은 데이터가 없습니다.")
     else:
@@ -120,11 +115,11 @@ if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_w
                 if not it["pnu"]: it["pnu"] = f"{sig_code}{bjd_code}1{it['bun']}{it['ji']}"
 
             total_p = len(query_list)
-            display_title = zone_name.strip() if zone_name.strip() else "대상구역"
-            st.info(f"행정코드 [{sig_code} / {bjd_code}] 적용 | 총 {total_p}개 필지에 대해 조회를 시작합니다.")
+            st.session_state["total_parcels_cnt"] = total_p
+            st.session_state["zone_title"] = zone_name.strip() if zone_name.strip() else "대상구역"
 
             all_records = []
-            zero_parcels = []
+            found_labels = set()
             prog = st.progress(0.0)
             status_box = st.empty()
 
@@ -141,24 +136,22 @@ if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_w
                     "pageNo": 1,
                     "_type": "json"
                 }
-                found = False
                 try:
                     r = requests.get(BASE_URL, params=params, timeout=8)
                     items = r.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
                     if isinstance(items, dict):
                         items["pnu"] = item["pnu"]
+                        items["query_label"] = item["label"]
                         all_records.append(items)
-                        found = True
+                        found_labels.add(item["label"])
                     elif isinstance(items, list) and items:
                         for it in items:
                             it["pnu"] = item["pnu"]
+                            it["query_label"] = item["label"]
                             all_records.append(it)
-                        found = True
+                        found_labels.add(item["label"])
                 except Exception:
                     pass
-
-                if not found:
-                    zero_parcels.append(item["label"])
 
                 prog.progress((idx + 1) / total_p)
                 time.sleep(0.02)
@@ -166,74 +159,120 @@ if st.button("🚀 종전연면적 및 노후도 조서 산출", use_container_w
             status_box.empty()
             prog.empty()
 
-            if not all_records:
-                st.warning("조회된 건축물대장이 없습니다.")
-            else:
-                df_raw = pd.DataFrame(all_records)
-                raw_cnt = len(df_raw)
-                df = clean_and_aggregate_registers(df_raw)
-                refined_cnt = len(df)
+            # 대장 정제
+            df_cleaned = clean_and_aggregate_registers(pd.DataFrame(all_records)) if all_records else pd.DataFrame()
+            st.session_state["raw_bld_df"] = df_cleaned
 
-                current_year = datetime.now().year
-                def calc_age(d):
-                    if pd.isna(d) or str(d).strip() == "": return None
-                    d_s = str(d).strip()
-                    if len(d_s) >= 4:
-                        try: return current_year - int(d_s[:4])
-                        except: return None
-                    return None
+            # 필지별 소계 조서 테이블 구성 (미조회 필지 포함 전수 매핑)
+            summary_list = []
+            for item in query_list:
+                lbl = item["label"]
+                if not df_cleaned.empty and lbl in df_cleaned["query_label"].values:
+                    sub = df_cleaned[df_cleaned["query_label"] == lbl]
+                    tot_area = float(sub["totArea"].sum())
+                    vl_area = float(sub["vlRatEstmTotArea"].sum())
+                    dong_cnt = int(len(sub))
+                    b_names = ", ".join([str(v) for v in sub["bldNm"] if str(v).strip()])
+                    plat_plc = sub["platPlc"].iloc[0] if "platPlc" in sub.columns and sub["platPlc"].iloc[0] else "-"
+                    summary_list.append({
+                        "구분": "정상 조회",
+                        "지번": lbl,
+                        "19자리 PNU": item["pnu"],
+                        "대지위치": plat_plc,
+                        "건축물 동수": dong_cnt,
+                        "종전연면적(㎡)": round(tot_area, 2),
+                        "용적률산정면적(㎡)": round(vl_area, 2),
+                        "건물명": b_names,
+                        "비고": "API 자동수집"
+                    })
+                else:
+                    summary_list.append({
+                        "구분": "⚠️ 대장 미조회",
+                        "지번": lbl,
+                        "19자리 PNU": item["pnu"],
+                        "대지위치": "-",
+                        "건축물 동수": 0,
+                        "종전연면적(㎡)": 0.0,
+                        "용적률산정면적(㎡)": 0.0,
+                        "건물명": "-",
+                        "비고": "수기 입력 필요 (무허가/합필 등)"
+                    })
 
-                df["age"] = df["useAprDay"].apply(calc_age) if "useAprDay" in df.columns else None
-                df["is_old_30"] = df["age"].apply(lambda x: True if x is not None and x >= 30 else False)
+            st.session_state["summary_df"] = pd.DataFrame(summary_list)
 
-                raw_tot_m2 = float(df["totArea"].sum())
-                raw_vl_m2 = float(df["vlRatEstmTotArea"].sum())
+# ----------------------------------------------------
+# 5. 상호작용형 조서 표출 및 실시간 수기 보완 에디터
+# ----------------------------------------------------
+if "summary_df" in st.session_state and not st.session_state["summary_df"].empty:
+    display_title = st.session_state.get("zone_title", "대상구역")
+    df_editor_source = st.session_state["summary_df"].copy()
 
-                # 간이 보정 계산 로직
-                est_m2 = 0.0
-                if enable_estimate and zero_parcels:
-                    if estimate_mode == "구역 내 대장 있는 필지 평균 연면적 대입":
-                        avg_m2_per_parcel = raw_tot_m2 / (total_p - len(zero_parcels)) if (total_p - len(zero_parcels)) > 0 else 0
-                        est_m2 = avg_m2_per_parcel * len(zero_parcels)
-                    else:
-                        est_m2 = (custom_py * 3.3058) * len(zero_parcels)
+    st.markdown("---")
+    st.subheader(f"📊 {display_title} 필지별 종전연면적 조서 및 수기 보정 테이블")
 
-                final_tot_m2 = raw_tot_m2 + est_m2
-                final_tot_py = final_tot_m2 / 3.3058
-                final_vl_m2 = raw_vl_m2 + (est_m2 * 0.9) # 간이 용적률 면적(90% 추정)
-                final_vl_py = final_vl_m2 / 3.3058
+    unfound_cnt = len(df_editor_source[df_editor_source["구분"].str.contains("미조회")])
+    if unfound_cnt > 0:
+        st.warning(f"⚠️ 총 {len(df_editor_source)}개 필지 중 **{unfound_cnt}개 필지가 '대장 미조회' 상태**입니다. 아래 표에서 **주황/빨간색 표시된 행의 [종전연면적(㎡)] 열을 더블클릭하여 수기 입력**하시면 상단 대시보드가 즉시 갱신됩니다.")
 
-                valid_age = df[df["age"].notnull()]
-                old_cnt = int(df["is_old_30"].sum())
-                old_ratio = (old_cnt / len(valid_age) * 100) if len(valid_age) > 0 else 0.0
+    # 사용자가 표에서 직접 수정할 수 있는 st.data_editor
+    edited_df = st.data_editor(
+        df_editor_source,
+        use_container_width=True,
+        num_rows="fixed",
+        disabled=["구분", "지번", "19자리 PNU", "대지위치"],
+        column_config={
+            "종전연면적(㎡)": st.column_config.NumberColumn(
+                "종전연면적(㎡)",
+                help="수기 보완치를 입력하면 상단 합계에 즉각 반영됩니다.",
+                min_value=0.0,
+                format="%.2f ㎡"
+            ),
+            "구분": st.column_config.TextColumn(
+                "조회 상태",
+                help="정상 조회 여부"
+            )
+        }
+    )
 
-                st.markdown("---")
-                st.subheader(f"📊 {display_title} 종전연면적 및 노후도 최종 집계표")
+    # 수정된 값 기반 실시간 재집계
+    final_tot_m2 = float(pd.to_numeric(edited_df["종전연면적(㎡)"], errors="coerce").fillna(0.0).sum())
+    final_tot_py = final_tot_m2 / 3.3058
+    final_vl_m2 = float(pd.to_numeric(edited_df["용적률산정면적(㎡)"], errors="coerce").fillna(0.0).sum())
+    final_vl_py = final_vl_m2 / 3.3058
+    final_dong_cnt = int(pd.to_numeric(edited_df["건축물 동수"], errors="coerce").fillna(0).sum())
 
-                if enable_estimate and zero_parcels:
-                    st.success(f"✨ **간이 보정 적용 완료**: 대장 정상 필지({total_p - len(zero_parcels)}개)에서 산출된 {raw_tot_m2:,.0f}㎡에 미등재/합필 필지({len(zero_parcels)}개)의 추정 연면적 {est_m2:,.0f}㎡를 가산했습니다.")
+    # 노후도 계산
+    raw_df = st.session_state.get("raw_bld_df", pd.DataFrame())
+    old_ratio = 0.0
+    old_cnt = 0
+    valid_age_cnt = 0
+    if not raw_df.empty and "useAprDay" in raw_df.columns:
+        current_year = datetime.now().year
+        def calc_age(d):
+            if pd.isna(d) or str(d).strip() == "": return None
+            d_s = str(d).strip()
+            if len(d_s) >= 4:
+                try: return current_year - int(d_s[:4])
+                except: return None
+            return None
+        ages = raw_df["useAprDay"].apply(calc_age)
+        valid_ages = ages.dropna()
+        valid_age_cnt = len(valid_ages)
+        old_cnt = int((valid_ages >= 30).sum())
+        old_ratio = (old_cnt / valid_age_cnt * 100) if valid_age_cnt > 0 else 0.0
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("실물 건축물 동수", f"{refined_cnt:,} 동 (+{len(zero_parcels)}필지 보정)")
-                m2.metric("최종 종전연면적", f"{final_tot_m2:,.1f} ㎡", f"{final_tot_py:,.1f} 평")
-                m3.metric("용적률산정용 연면적", f"{final_vl_m2:,.1f} ㎡", f"{final_vl_py:,.1f} 평")
-                m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {len(valid_age)}동")
+    # 상단 요약 카드 (수정값 실시간 연동)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("확인 건축물 동수", f"{final_dong_cnt:,} 동", f"총 {len(edited_df)}개 필지")
+    m2.metric("최종 종전연면적", f"{final_tot_m2:,.1f} ㎡", f"{final_tot_py:,.1f} 평")
+    m3.metric("용적률산정용 연면적", f"{final_vl_m2:,.1f} ㎡", f"{final_vl_py:,.1f} 평")
+    m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {valid_age_cnt}동 기준")
 
-                if zero_parcels:
-                    st.warning(f"⚠️ 대장 미조회 필지 ({len(zero_parcels)}개): {', '.join(zero_parcels)}")
-
-                t1, t2 = st.tabs(["📑 19자리 PNU 지번별 소계 조서", "📋 대장 원천 상세 데이터"])
-                with t1:
-                    summary = df.groupby(["pnu", "platPlc"]).agg(
-                        동수=("totArea", "count"),
-                        연면적_m2=("totArea", "sum"),
-                        용적률면적_m2=("vlRatEstmTotArea", "sum"),
-                        건물명=("bldNm", lambda x: ", ".join([str(v) for v in x if str(v).strip() != ""]))
-                    ).reset_index()
-                    summary["연면적_평"] = (summary["연면적_m2"] / 3.3058).round(1)
-                    st.dataframe(summary, use_container_width=True)
-
-                with t2:
-                    disp_cols = ["pnu", "platPlc", "bldNm", "regstrKindCdNm", "totArea", "vlRatEstmTotArea", "useAprDay", "age", "is_old_30"]
-                    avail = [c for c in disp_cols if c in df.columns]
-                    st.dataframe(df[avail], use_container_width=True)
+    # CSV 다운로드
+    edited_df["종전연면적(평)"] = (pd.to_numeric(edited_df["종전연면적(㎡)"]) / 3.3058).round(1)
+    st.download_button(
+        label=f"📥 {display_title}_최종수정조서_다운로드.csv",
+        data=edited_df.to_csv(index=False, encoding="utf-8-sig"),
+        file_name=f"{display_title}_종전연면적조서_완성본.csv",
+        mime="text/csv"
+    )
