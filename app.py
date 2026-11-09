@@ -14,7 +14,7 @@ st.title("🏙️ 서울시 정비사업구역 전수 자동 필지추출 및 �
 # ----------------------------------------------------
 # 1. 사이드바 설정
 # ----------------------------------------------------
-DEFAULT_SERVICE_KEY = ""  # 공공데이터 Decoding 키 입력 (고정용)
+DEFAULT_SERVICE_KEY = "ewFq4vtF6VE99JJ6B3hs9hD0YRssb4Y4p0KGSpLQsIkO5tSTNhauXB2y47pTnCu00ghthtujLk7cKBVQDzC0kg=="
 
 with st.sidebar:
     st.header("🔑 API 설정")
