@@ -92,7 +92,7 @@ raw_input_text = st.text_area(
     "📥 AI가 추출한 데이터 블록을 그대로 붙여넣으세요:",
     value="",
     placeholder="[행정구역] 11380, 10300\n[지번목록] 600-1, 600-2, 601-1 ...",
-    height=180
+    height=170
 )
 
 # ----------------------------------------------------
@@ -119,7 +119,6 @@ if st.button("🚀 건축물대장 수집 및 분석 조서 생성", use_contain
             st.session_state["zone_title"] = zone_name.strip() if zone_name.strip() else "대상구역"
 
             all_records = []
-            found_labels = set()
             prog = st.progress(0.0)
             status_box = st.empty()
 
@@ -143,13 +142,11 @@ if st.button("🚀 건축물대장 수집 및 분석 조서 생성", use_contain
                         items["pnu"] = item["pnu"]
                         items["query_label"] = item["label"]
                         all_records.append(items)
-                        found_labels.add(item["label"])
                     elif isinstance(items, list) and items:
                         for it in items:
                             it["pnu"] = item["pnu"]
                             it["query_label"] = item["label"]
                             all_records.append(it)
-                        found_labels.add(item["label"])
                 except Exception:
                     pass
 
@@ -200,47 +197,83 @@ if st.button("🚀 건축물대장 수집 및 분석 조서 생성", use_contain
             st.session_state["summary_df"] = pd.DataFrame(summary_list)
 
 # ----------------------------------------------------
-# 상호작용형 조서 및 음영 스타일링 테이블
+# 단일 메인 표 (음영 처리 + 수정 즉시 실시간 재집계)
 # ----------------------------------------------------
 if "summary_df" in st.session_state and not st.session_state["summary_df"].empty:
     display_title = st.session_state.get("zone_title", "대상구역")
-    df_editor_source = st.session_state["summary_df"].copy()
+    df_current = st.session_state["summary_df"].copy()
 
     st.markdown("---")
-    st.subheader(f"📊 {display_title} 필지별 종전연면적 조서 및 수기 보정 테이블")
+    st.subheader(f"📊 {display_title} 필지별 종전연면적 조서 (실시간 집계)")
 
-    unfound_cnt = len(df_editor_source[df_editor_source["구분"].str.contains("미조회")])
+    unfound_cnt = len(df_current[df_current["구분"].str.contains("미조회")])
     if unfound_cnt > 0:
-        st.warning(f"⚠️ 총 {len(df_editor_source)}개 필지 중 **{unfound_cnt}개 필지가 '대장 미조회' 상태**입니다. 아래 표에서 **주황/살구색 음영 처리된 필지들의 [종전연면적(㎡)] 열을 더블클릭하여 수기 입력**하세요.")
+        st.warning(f"⚠️ 총 {len(df_current)}개 필지 중 **{unfound_cnt}개 필지가 '대장 미조회' 상태**입니다. 주황색 배지(`⚠️ 대장 미조회`) 필지의 **[종전연면적(㎡)]** 값을 입력하면 상단 총계가 즉시 수정됩니다.")
 
-    # 1. 수기 입력이 가능한 data_editor
+    # 상단 요약 카드가 들어갈 자리 확보 (플레이스홀더)
+    metrics_placeholder = st.container()
+
+    # 단일 메인 편집 표: data_editor의 column_config와 CSS 레벨 음영 주입
+    # 미조회 행 시각 구분을 위해 CSS 주입
+    st.markdown("""
+    <style>
+    /* 미조회 행을 식별하기 위한 테두리 및 뱃지 스타일 */
+    div[data-testid="stDataEditor"] div[role="row"]:has(span[title*="미조회"]) {
+        background-color: #FFF2E8 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     edited_df = st.data_editor(
-        df_editor_source,
+        df_current,
         use_container_width=True,
         num_rows="fixed",
-        disabled=["구분", "지번", "19자리 PNU", "대지위치"],
+        key="main_editor",
+        disabled=["19자리 PNU", "대지위치"],
         column_config={
+            "구분": st.column_config.TextColumn(
+                "조회 상태",
+                help="정상 조회 또는 미조회 여부",
+                disabled=True
+            ),
+            "지번": st.column_config.TextColumn(
+                "지번",
+                disabled=True
+            ),
+            "건축물 동수": st.column_config.NumberColumn(
+                "동수 ✍️",
+                help="수기 수정 가능",
+                min_value=0,
+                step=1,
+                format="%d 동"
+            ),
             "종전연면적(㎡)": st.column_config.NumberColumn(
                 "종전연면적(㎡) ✍️",
-                help="미조회 필지 수치를 입력하면 상단 합계에 즉각 반영됩니다.",
+                help="값을 수정하고 Enter를 누르면 상단 총계가 즉시 재계산됩니다.",
                 min_value=0.0,
                 format="%.2f ㎡"
             ),
-            "구분": st.column_config.TextColumn(
-                "조회 상태",
-                help="정상 조회 여부"
+            "용적률산정면적(㎡)": st.column_config.NumberColumn(
+                "용적률산정면적(㎡) ✍️",
+                help="수기 수정 가능",
+                min_value=0.0,
+                format="%.2f ㎡"
+            ),
+            "비고": st.column_config.TextColumn(
+                "비고 ✍️",
+                help="특이사항 직접 입력"
             )
         }
     )
 
-    # 수정 수치 기반 실시간 재집계
+    # 사용자가 표에서 수정한 값 실시간 반영
     final_tot_m2 = float(pd.to_numeric(edited_df["종전연면적(㎡)"], errors="coerce").fillna(0.0).sum())
     final_tot_py = final_tot_m2 / 3.3058
     final_vl_m2 = float(pd.to_numeric(edited_df["용적률산정면적(㎡)"], errors="coerce").fillna(0.0).sum())
     final_vl_py = final_vl_m2 / 3.3058
     final_dong_cnt = int(pd.to_numeric(edited_df["건축물 동수"], errors="coerce").fillna(0).sum())
 
-    # 노후도 계산
+    # 노후도 집계
     raw_df = st.session_state.get("raw_bld_df", pd.DataFrame())
     old_ratio = 0.0
     old_cnt = 0
@@ -260,29 +293,19 @@ if "summary_df" in st.session_state and not st.session_state["summary_df"].empty
         old_cnt = int((valid_ages >= 30).sum())
         old_ratio = (old_cnt / valid_age_cnt * 100) if valid_age_cnt > 0 else 0.0
 
-    # 상단 요약 지표 카드
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("확인 건축물 동수", f"{final_dong_cnt:,} 동", f"총 {len(edited_df)}개 필지")
-    m2.metric("최종 종전연면적", f"{final_tot_m2:,.1f} ㎡", f"{final_tot_py:,.1f} 평")
-    m3.metric("용적률산정용 연면적", f"{final_vl_m2:,.1f} ㎡", f"{final_vl_py:,.1f} 평")
-    m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {valid_age_cnt}동 기준")
+    # 확보된 상단 자리에 실시간 갱신된 메트릭 카드 렌더링
+    with metrics_placeholder:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("확인 건축물 동수", f"{final_dong_cnt:,} 동", f"총 {len(edited_df)}개 필지")
+        m2.metric("최종 종전연면적", f"{final_tot_m2:,.1f} ㎡", f"{final_tot_py:,.1f} 평")
+        m3.metric("용적률산정용 연면적", f"{final_vl_m2:,.1f} ㎡", f"{final_vl_py:,.1f} 평")
+        m4.metric("30년 이상 노후도 비율", f"{old_ratio:.1f} %", f"{old_cnt}동 / {valid_age_cnt}동 기준")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    # 2. 미조회 필지 강조 음영 뷰어 (수기 대상 행 한눈에 파악)
-    st.markdown("#### 🎨 미조회 필지 음영 하이라이트 뷰")
-    def highlight_unfound(row):
-        if "미조회" in str(row["구분"]):
-            # 연한 주황빛 배경색 및 강조 테두리
-            return ["background-color: #FFF2E8; color: #D4380D; font-weight: bold; border-bottom: 1px solid #FFBB96;"] * len(row)
-        return [""] * len(row)
-
-    styled_table = edited_df.style.apply(highlight_unfound, axis=1).format({
-        "종전연면적(㎡)": "{:,.2f} ㎡",
-        "용적률산정면적(㎡)": "{:,.2f} ㎡"
-    })
-    st.dataframe(styled_table, use_container_width=True)
-
-    # CSV 다운로드
+    # 다운로드용 데이터 세팅
     edited_df["종전연면적(평)"] = (pd.to_numeric(edited_df["종전연면적(㎡)"]) / 3.3058).round(1)
+    edited_df["용적률산정면적(평)"] = (pd.to_numeric(edited_df["용적률산정면적(㎡)"]) / 3.3058).round(1)
+
     st.download_button(
         label=f"📥 {display_title}_최종수정조서_다운로드.csv",
         data=edited_df.to_csv(index=False, encoding="utf-8-sig"),
